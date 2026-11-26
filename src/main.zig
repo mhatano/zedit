@@ -1,7 +1,7 @@
 const std = @import("std");
 const Editor = @import("editor.zig").Editor;
 
-pub const VERSION = "0.1.0";
+pub const VERSION = "0.2.0";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
