@@ -80,6 +80,7 @@ const win32 = if (is_windows) struct {
     const BOOL = w.BOOL;
     const WORD = w.WORD;
     const SHORT = i16;
+    const WCHAR = u16;
 
     const COORD = extern struct { X: SHORT, Y: SHORT };
     const SMALL_RECT = extern struct { Left: SHORT, Top: SHORT, Right: SHORT, Bottom: SHORT };
@@ -91,10 +92,41 @@ const win32 = if (is_windows) struct {
         dwMaximumWindowSize: COORD,
     };
 
+    const KEY_EVENT: WORD = 0x0001;
+    const WINDOW_BUFFER_SIZE_EVENT: WORD = 0x0004;
+
+    const KEY_EVENT_RECORD = extern struct {
+        bKeyDown: BOOL,
+        wRepeatCount: WORD,
+        wVirtualKeyCode: WORD,
+        wVirtualScanCode: WORD,
+        uChar: extern union {
+            UnicodeChar: WCHAR,
+            AsciiChar: u8,
+        },
+        dwControlKeyState: DWORD,
+    };
+
+    const WINDOW_BUFFER_SIZE_RECORD = extern struct {
+        dwSize: COORD,
+    };
+
+    const INPUT_RECORD = extern struct {
+        EventType: WORD,
+        _pad: WORD = 0,
+        Event: extern union {
+            KeyEvent: KEY_EVENT_RECORD,
+            WindowBufferSizeEvent: WINDOW_BUFFER_SIZE_RECORD,
+            _raw: [16]u8,
+        },
+    };
+
     const ENABLE_PROCESSED_INPUT: DWORD = 0x0001;
     const ENABLE_LINE_INPUT: DWORD = 0x0002;
     const ENABLE_ECHO_INPUT: DWORD = 0x0004;
     const ENABLE_WINDOW_INPUT: DWORD = 0x0008;
+    const ENABLE_MOUSE_INPUT: DWORD = 0x0010;
+    const ENABLE_EXTENDED_FLAGS: DWORD = 0x0080;
     const ENABLE_VIRTUAL_TERMINAL_INPUT: DWORD = 0x0200;
 
     const ENABLE_PROCESSED_OUTPUT: DWORD = 0x0001;
@@ -105,6 +137,7 @@ const win32 = if (is_windows) struct {
     extern "kernel32" fn SetConsoleMode(hConsoleHandle: HANDLE, dwMode: DWORD) callconv(w.WINAPI) BOOL;
     extern "kernel32" fn GetConsoleScreenBufferInfo(hConsoleOutput: HANDLE, lpConsoleScreenBufferInfo: *CONSOLE_SCREEN_BUFFER_INFO) callconv(w.WINAPI) BOOL;
     extern "kernel32" fn GetNumberOfConsoleInputEvents(hConsoleInput: HANDLE, lpcNumberOfEvents: *DWORD) callconv(w.WINAPI) BOOL;
+    extern "kernel32" fn ReadConsoleInputW(hConsoleInput: HANDLE, lpBuffer: [*]INPUT_RECORD, nLength: DWORD, lpNumberOfEventsRead: *DWORD) callconv(w.WINAPI) BOOL;
     extern "kernel32" fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) callconv(w.WINAPI) DWORD;
     extern "kernel32" fn SetConsoleOutputCP(wCodePageID: w.UINT) callconv(w.WINAPI) BOOL;
     extern "kernel32" fn SetConsoleCP(wCodePageID: w.UINT) callconv(w.WINAPI) BOOL;
@@ -119,6 +152,7 @@ pub const Terminal = struct {
     orig_termios: if (!is_windows) std.posix.termios else void,
     orig_in_mode: if (is_windows) std.os.windows.DWORD else void,
     orig_out_mode: if (is_windows) std.os.windows.DWORD else void,
+    win_utf16_high: if (is_windows) ?u16 else void,
 
     last_size: Size,
     in_buf: std.ArrayList(u8),
@@ -134,6 +168,7 @@ pub const Terminal = struct {
             .orig_termios = if (!is_windows) undefined else {},
             .orig_in_mode = if (is_windows) 0 else {},
             .orig_out_mode = if (is_windows) 0 else {},
+            .win_utf16_high = if (is_windows) null else {},
             .last_size = .{ .cols = 80, .rows = 24 },
             .in_buf = std.ArrayList(u8).init(allocator),
             .paste_buf = std.ArrayList(u8).init(allocator),
@@ -159,8 +194,10 @@ pub const Terminal = struct {
             _ = win32.GetConsoleMode(in_h, &self.orig_in_mode);
             _ = win32.GetConsoleMode(out_h, &self.orig_out_mode);
 
-            const new_in = (self.orig_in_mode & ~(win32.ENABLE_ECHO_INPUT | win32.ENABLE_LINE_INPUT | win32.ENABLE_PROCESSED_INPUT)) |
-                win32.ENABLE_VIRTUAL_TERMINAL_INPUT | win32.ENABLE_WINDOW_INPUT;
+            const new_in: std.os.windows.DWORD = win32.ENABLE_VIRTUAL_TERMINAL_INPUT |
+                win32.ENABLE_WINDOW_INPUT |
+                win32.ENABLE_MOUSE_INPUT |
+                win32.ENABLE_EXTENDED_FLAGS;
             const new_out = self.orig_out_mode | win32.ENABLE_PROCESSED_OUTPUT |
                 win32.ENABLE_VIRTUAL_TERMINAL_PROCESSING | win32.DISABLE_NEWLINE_AUTO_RETURN;
             _ = win32.SetConsoleMode(in_h, new_in);
@@ -240,12 +277,25 @@ pub const Terminal = struct {
             return .{ .cols = 80, .rows = 24 };
         } else {
             var ws: std.posix.winsize = undefined;
-            const rc = std.posix.system.ioctl(self.stdout_file.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&ws));
-            if (rc == 0 and ws.col > 0 and ws.row > 0) {
-                return .{ .cols = ws.col, .rows = ws.row };
+            const handles = [_]std.posix.fd_t{ self.stdout_file.handle, self.stdin_file.handle };
+            for (handles) |h| {
+                const rc = std.posix.system.ioctl(h, std.posix.T.IOCGWINSZ, @intFromPtr(&ws));
+                if (rc == 0 and ws.col > 0 and ws.row > 0) {
+                    return .{ .cols = ws.col, .rows = ws.row };
+                }
             }
             return .{ .cols = 80, .rows = 24 };
         }
+    }
+
+    fn checkResize(self: *Terminal) bool {
+        const sig = if (!is_windows) g_resized.swap(false, .acquire) else g_resized.swap(false, .acquire);
+        const sz = self.getSize();
+        if (sig or sz.cols != self.last_size.cols or sz.rows != self.last_size.rows) {
+            self.last_size = sz;
+            return true;
+        }
+        return false;
     }
 
     fn pollInput(self: *Terminal, timeout_ms: i32) bool {
@@ -271,29 +321,72 @@ pub const Terminal = struct {
 
     fn readMoreBytes(self: *Terminal, timeout_ms: i32) !usize {
         if (!self.pollInput(timeout_ms)) return 0;
-        var tmp: [512]u8 = undefined;
-        const n = self.stdin_file.read(&tmp) catch |err| {
-            if (err == error.WouldBlock) return 0;
-            return err;
-        };
-        if (n > 0) {
-            try self.in_buf.appendSlice(tmp[0..n]);
+        if (is_windows) {
+            var records: [64]win32.INPUT_RECORD = undefined;
+            var num_read: std.os.windows.DWORD = 0;
+            if (win32.ReadConsoleInputW(self.stdin_file.handle, &records, records.len, &num_read) == 0) {
+                return 0;
+            }
+            var added: usize = 0;
+            for (records[0..num_read]) |rec| {
+                if (rec.EventType == win32.WINDOW_BUFFER_SIZE_EVENT) {
+                    g_resized.store(true, .release);
+                } else if (rec.EventType == win32.KEY_EVENT) {
+                    const kev = rec.Event.KeyEvent;
+                    if (kev.bKeyDown != 0) {
+                        const ch = kev.uChar.UnicodeChar;
+                        if (ch != 0) {
+                            const repeat: usize = @max(@as(usize, kev.wRepeatCount), 1);
+                            var r: usize = 0;
+                            while (r < repeat) : (r += 1) {
+                                added += try self.appendWinUtf16Unit(ch);
+                            }
+                        }
+                    }
+                }
+            }
+            return added;
+        } else {
+            var tmp: [512]u8 = undefined;
+            const n = self.stdin_file.read(&tmp) catch |err| {
+                if (err == error.WouldBlock) return 0;
+                return err;
+            };
+            if (n > 0) {
+                try self.in_buf.appendSlice(tmp[0..n]);
+            }
+            return n;
         }
-        return n;
+    }
+
+    fn appendWinUtf16Unit(self: *Terminal, unit: u16) !usize {
+        if (is_windows) {
+            var cp: u21 = unit;
+            if (unit >= 0xD800 and unit <= 0xDBFF) {
+                self.win_utf16_high = unit;
+                return 0;
+            } else if (unit >= 0xDC00 and unit <= 0xDFFF) {
+                if (self.win_utf16_high) |hi| {
+                    cp = 0x10000 + ((@as(u21, hi - 0xD800) << 10) | @as(u21, unit - 0xDC00));
+                    self.win_utf16_high = null;
+                } else {
+                    return 0;
+                }
+            } else {
+                self.win_utf16_high = null;
+            }
+            var out: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(cp, &out) catch return 0;
+            try self.in_buf.appendSlice(out[0..len]);
+            return len;
+        }
+        return 0;
     }
 
     pub fn readEvent(self: *Terminal, timeout_ms: i32) !Event {
-        // Check resize
-        if (!is_windows and g_resized.swap(false, .acquire)) {
-            self.last_size = self.getSize();
+        // Check resize before reading input
+        if (self.checkResize()) {
             return .resize;
-        }
-        if (is_windows) {
-            const sz = self.getSize();
-            if (sz.cols != self.last_size.cols or sz.rows != self.last_size.rows) {
-                self.last_size = sz;
-                return .resize;
-            }
         }
 
         // Handle ongoing bracketed paste
@@ -303,8 +396,7 @@ pub const Terminal = struct {
 
         if (self.in_buf.items.len == 0) {
             _ = try self.readMoreBytes(timeout_ms);
-            if (!is_windows and g_resized.swap(false, .acquire)) {
-                self.last_size = self.getSize();
+            if (self.checkResize()) {
                 return .resize;
             }
             if (self.in_buf.items.len == 0) return .none;

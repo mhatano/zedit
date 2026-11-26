@@ -41,6 +41,7 @@ pub const Editor = struct {
 
     running: bool,
     dirty: bool,
+    clear_screen_on_render: bool,
     quit_confirm: bool,
     close_confirm: bool,
 
@@ -94,6 +95,7 @@ pub const Editor = struct {
             .explorer = explorer,
             .running = true,
             .dirty = true,
+            .clear_screen_on_render = true,
             .quit_confirm = false,
             .close_confirm = false,
             .clipboard = std.ArrayList(u8).init(allocator),
@@ -185,6 +187,7 @@ pub const Editor = struct {
                     }
                 },
                 .resize => {
+                    self.clear_screen_on_render = true;
                     self.dirty = true;
                 },
                 .key => |k| {
@@ -1462,7 +1465,12 @@ pub const Editor = struct {
         const w = self.frame_buf.writer();
 
         // Synchronized update start + hide cursor + home
-        try w.writeAll("\x1b[?2026h\x1b[?25l\x1b[H");
+        if (self.clear_screen_on_render) {
+            try w.writeAll("\x1b[?2026h\x1b[?25l\x1b[0m\x1b[2J\x1b[H");
+            self.clear_screen_on_render = false;
+        } else {
+            try w.writeAll("\x1b[?2026h\x1b[?25l\x1b[H");
+        }
 
         const panel_rows = self.panelRows();
         const ed_rows = if (size.rows > 2 + panel_rows) size.rows - 2 - panel_rows else 1;
