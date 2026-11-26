@@ -136,12 +136,71 @@ pub const Explorer = struct {
         }
     }
 
-    pub fn moveUp(self: *Explorer) void {
+    pub fn moveUp(self: *Explorer, view_height: usize) void {
         if (self.selected > 0) self.selected -= 1;
+        self.ensureVisible(view_height);
     }
 
-    pub fn moveDown(self: *Explorer) void {
+    pub fn moveDown(self: *Explorer, view_height: usize) void {
         if (self.selected + 1 < self.entries.items.len) self.selected += 1;
+        self.ensureVisible(view_height);
+    }
+
+    pub fn pageUp(self: *Explorer, view_height: usize) void {
+        const step = @max(view_height, 1);
+        self.selected -|= step;
+        self.ensureVisible(view_height);
+    }
+
+    pub fn pageDown(self: *Explorer, view_height: usize) void {
+        if (self.entries.items.len == 0) return;
+        const step = @max(view_height, 1);
+        self.selected = @min(self.selected + step, self.entries.items.len - 1);
+        self.ensureVisible(view_height);
+    }
+
+    pub fn moveHome(self: *Explorer, view_height: usize) void {
+        self.selected = 0;
+        self.ensureVisible(view_height);
+    }
+
+    pub fn moveEnd(self: *Explorer, view_height: usize) void {
+        if (self.entries.items.len > 0) {
+            self.selected = self.entries.items.len - 1;
+        }
+        self.ensureVisible(view_height);
+    }
+
+    pub fn scrollBy(self: *Explorer, delta: isize, view_height: usize) void {
+        if (self.entries.items.len == 0 or view_height == 0) {
+            self.scroll = 0;
+            return;
+        }
+        const max_scroll = if (self.entries.items.len > view_height)
+            self.entries.items.len - view_height
+        else
+            0;
+        if (delta < 0) {
+            const sub: usize = @intCast(-delta);
+            self.scroll -|= sub;
+        } else {
+            const add: usize = @intCast(delta);
+            self.scroll = @min(self.scroll + add, max_scroll);
+        }
+    }
+
+    pub fn clampScroll(self: *Explorer, view_height: usize) void {
+        if (self.entries.items.len == 0 or view_height == 0) {
+            self.scroll = 0;
+            return;
+        }
+        const max_scroll = if (self.entries.items.len > view_height)
+            self.entries.items.len - view_height
+        else
+            0;
+        if (self.scroll > max_scroll) {
+            self.scroll = max_scroll;
+        }
     }
 
     pub fn ensureVisible(self: *Explorer, view_height: usize) void {
@@ -151,6 +210,7 @@ pub const Explorer = struct {
         } else if (self.selected >= self.scroll + view_height) {
             self.scroll = self.selected - view_height + 1;
         }
+        self.clampScroll(view_height);
     }
 
     /// Toggles directory expansion or returns the file path to open.
@@ -170,7 +230,7 @@ pub const Explorer = struct {
         return entry.path;
     }
 
-    pub fn collapseOrParent(self: *Explorer) !void {
+    pub fn collapseOrParent(self: *Explorer, view_height: usize) !void {
         if (self.entries.items.len == 0) return;
         const entry = self.entries.items[self.selected];
         if (entry.is_dir and entry.is_expanded) {
@@ -178,6 +238,7 @@ pub const Explorer = struct {
                 self.allocator.free(kv.key);
             }
             try self.refresh();
+            self.ensureVisible(view_height);
             return;
         }
         if (entry.depth > 0) {
@@ -186,6 +247,7 @@ pub const Explorer = struct {
                 i -= 1;
                 if (self.entries.items[i].depth < entry.depth) {
                     self.selected = i;
+                    self.ensureVisible(view_height);
                     return;
                 }
             }

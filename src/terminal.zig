@@ -93,7 +93,17 @@ const win32 = if (is_windows) struct {
     };
 
     const KEY_EVENT: WORD = 0x0001;
+    const MOUSE_EVENT: WORD = 0x0002;
     const WINDOW_BUFFER_SIZE_EVENT: WORD = 0x0004;
+
+    const MOUSE_MOVED: DWORD = 0x0001;
+    const MOUSE_WHEELED: DWORD = 0x0004;
+
+    const RIGHT_ALT_PRESSED: DWORD = 0x0001;
+    const LEFT_ALT_PRESSED: DWORD = 0x0002;
+    const RIGHT_CTRL_PRESSED: DWORD = 0x0004;
+    const LEFT_CTRL_PRESSED: DWORD = 0x0008;
+    const SHIFT_PRESSED: DWORD = 0x0010;
 
     const KEY_EVENT_RECORD = extern struct {
         bKeyDown: BOOL,
@@ -107,6 +117,13 @@ const win32 = if (is_windows) struct {
         dwControlKeyState: DWORD,
     };
 
+    const MOUSE_EVENT_RECORD = extern struct {
+        dwMousePosition: COORD,
+        dwButtonState: DWORD,
+        dwControlKeyState: DWORD,
+        dwEventFlags: DWORD,
+    };
+
     const WINDOW_BUFFER_SIZE_RECORD = extern struct {
         dwSize: COORD,
     };
@@ -116,6 +133,7 @@ const win32 = if (is_windows) struct {
         _pad: WORD = 0,
         Event: extern union {
             KeyEvent: KEY_EVENT_RECORD,
+            MouseEvent: MOUSE_EVENT_RECORD,
             WindowBufferSizeEvent: WINDOW_BUFFER_SIZE_RECORD,
             _raw: [16]u8,
         },
@@ -331,6 +349,27 @@ pub const Terminal = struct {
             for (records[0..num_read]) |rec| {
                 if (rec.EventType == win32.WINDOW_BUFFER_SIZE_EVENT) {
                     g_resized.store(true, .release);
+                } else if (rec.EventType == win32.MOUSE_EVENT) {
+                    const mev = rec.Event.MouseEvent;
+                    const mx: usize = @intCast(@max(mev.dwMousePosition.X, 0) + 1);
+                    const my: usize = @intCast(@max(mev.dwMousePosition.Y, 0) + 1);
+                    var sgr_buf: [32]u8 = undefined;
+                    if ((mev.dwEventFlags & win32.MOUSE_WHEELED) != 0) {
+                        const delta: i16 = @bitCast(@as(u16, @truncate(mev.dwButtonState >> 16)));
+                        const btn: u8 = if (delta > 0) 64 else 65;
+                        const s = std.fmt.bufPrint(&sgr_buf, "\x1b[<{d};{d};{d}M", .{ btn, mx, my }) catch "";
+                        try self.in_buf.appendSlice(s);
+                        added += s.len;
+                    } else if (mev.dwEventFlags == 0) {
+                        const pressed = (mev.dwButtonState & 0x01) != 0;
+                        const s = std.fmt.bufPrint(&sgr_buf, "\x1b[<0;{d};{d}{c}", .{ mx, my, if (pressed) @as(u8, 'M') else 'm' }) catch "";
+                        try self.in_buf.appendSlice(s);
+                        added += s.len;
+                    } else if ((mev.dwEventFlags & win32.MOUSE_MOVED) != 0 and (mev.dwButtonState & 0x01) != 0) {
+                        const s = std.fmt.bufPrint(&sgr_buf, "\x1b[<32;{d};{d}M", .{ mx, my }) catch "";
+                        try self.in_buf.appendSlice(s);
+                        added += s.len;
+                    }
                 } else if (rec.EventType == win32.KEY_EVENT) {
                     const kev = rec.Event.KeyEvent;
                     if (kev.bKeyDown != 0) {
@@ -341,6 +380,8 @@ pub const Terminal = struct {
                             while (r < repeat) : (r += 1) {
                                 added += try self.appendWinUtf16Unit(ch);
                             }
+                        } else {
+                            added += try self.appendWinVirtualKey(kev.wVirtualKeyCode, kev.dwControlKeyState);
                         }
                     }
                 }
@@ -379,6 +420,37 @@ pub const Terminal = struct {
             const len = std.unicode.utf8Encode(cp, &out) catch return 0;
             try self.in_buf.appendSlice(out[0..len]);
             return len;
+        }
+        return 0;
+    }
+
+    fn appendWinVirtualKey(self: *Terminal, vk: u16, ctrl_state: u32) !usize {
+        if (is_windows) {
+            const shift = (ctrl_state & win32.SHIFT_PRESSED) != 0;
+            const alt = (ctrl_state & (win32.LEFT_ALT_PRESSED | win32.RIGHT_ALT_PRESSED)) != 0;
+            const ctrl = (ctrl_state & (win32.LEFT_CTRL_PRESSED | win32.RIGHT_CTRL_PRESSED)) != 0;
+            const mod: u8 = 1 + (if (shift) @as(u8, 1) else 0) + (if (alt) @as(u8, 2) else 0) + (if (ctrl) @as(u8, 4) else 0);
+
+            var buf: [16]u8 = undefined;
+            const seq: []const u8 = switch (vk) {
+                0x26 => if (mod == 1) "\x1b[A" else std.fmt.bufPrint(&buf, "\x1b[1;{d}A", .{mod}) catch "", // VK_UP
+                0x28 => if (mod == 1) "\x1b[B" else std.fmt.bufPrint(&buf, "\x1b[1;{d}B", .{mod}) catch "", // VK_DOWN
+                0x27 => if (mod == 1) "\x1b[C" else std.fmt.bufPrint(&buf, "\x1b[1;{d}C", .{mod}) catch "", // VK_RIGHT
+                0x25 => if (mod == 1) "\x1b[D" else std.fmt.bufPrint(&buf, "\x1b[1;{d}D", .{mod}) catch "", // VK_LEFT
+                0x24 => if (mod == 1) "\x1b[H" else std.fmt.bufPrint(&buf, "\x1b[1;{d}H", .{mod}) catch "", // VK_HOME
+                0x23 => if (mod == 1) "\x1b[F" else std.fmt.bufPrint(&buf, "\x1b[1;{d}F", .{mod}) catch "", // VK_END
+                0x21 => if (mod == 1) "\x1b[5~" else std.fmt.bufPrint(&buf, "\x1b[5;{d}~", .{mod}) catch "", // VK_PRIOR (PageUp)
+                0x22 => if (mod == 1) "\x1b[6~" else std.fmt.bufPrint(&buf, "\x1b[6;{d}~", .{mod}) catch "", // VK_NEXT (PageDown)
+                0x2E => if (mod == 1) "\x1b[3~" else std.fmt.bufPrint(&buf, "\x1b[3;{d}~", .{mod}) catch "", // VK_DELETE
+                0x70 => "\x1bOP", // VK_F1
+                0x71 => "\x1bOQ", // VK_F2
+                0x72 => if (shift) "\x1b[1;2R" else "\x1bOR", // VK_F3
+                else => "",
+            };
+            if (seq.len > 0) {
+                try self.in_buf.appendSlice(seq);
+                return seq.len;
+            }
         }
         return 0;
     }

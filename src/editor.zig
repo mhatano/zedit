@@ -399,9 +399,30 @@ pub const Editor = struct {
             }
         }
 
-        // Alt shortcuts (tab switching, search toggles)
+        // Alt shortcuts (tab switching, sidebar scrolling, search toggles)
         if (k.alt and !k.ctrl) {
+            const view_h = if (self.last_editor_rows > 1) self.last_editor_rows - 1 else 1;
             switch (k.code) {
+                .up => {
+                    if (!self.explorer.visible) self.explorer.visible = true;
+                    self.explorer.moveUp(view_h);
+                    return;
+                },
+                .down => {
+                    if (!self.explorer.visible) self.explorer.visible = true;
+                    self.explorer.moveDown(view_h);
+                    return;
+                },
+                .page_up => {
+                    if (!self.explorer.visible) self.explorer.visible = true;
+                    self.explorer.pageUp(view_h);
+                    return;
+                },
+                .page_down => {
+                    if (!self.explorer.visible) self.explorer.visible = true;
+                    self.explorer.pageDown(view_h);
+                    return;
+                },
                 .left => {
                     if (self.buffers.items.len > 1) {
                         self.active_idx = if (self.active_idx == 0) self.buffers.items.len - 1 else self.active_idx - 1;
@@ -438,7 +459,7 @@ pub const Editor = struct {
             return;
         }
         if (k.code == .f1) {
-            self.setStatus("Keys: ^S Save │ ^O Open │ ^N New │ ^W Close │ ^F Find │ ^H Replace │ ^B/^E Tree │ Alt+←/→ Tabs │ ^G GoTo │ ^Q Quit", false);
+            self.setStatus("Keys: ^S Save │ ^O Open │ ^N New │ ^W Close │ ^F Find │ ^H Replace │ ^B/^E Tree (Alt+↑/↓) │ Alt+←/→ Tabs │ ^Q Quit", false);
             return;
         }
 
@@ -455,24 +476,47 @@ pub const Editor = struct {
     }
 
     fn handleExplorerKey(self: *Editor, k: Term.KeyEvent) !void {
+        const view_h = if (self.last_editor_rows > 1) self.last_editor_rows - 1 else 1;
         switch (k.code) {
             .escape, .tab => self.explorer.focused = false,
-            .up => self.explorer.moveUp(),
-            .down => self.explorer.moveDown(),
+            .up => self.explorer.moveUp(view_h),
+            .down => self.explorer.moveDown(view_h),
+            .page_up => self.explorer.pageUp(view_h),
+            .page_down => self.explorer.pageDown(view_h),
+            .home => self.explorer.moveHome(view_h),
+            .end => self.explorer.moveEnd(view_h),
             .enter, .right => {
                 if (try self.explorer.activateSelected()) |file_path| {
                     const duped = try self.allocator.dupe(u8, file_path);
                     defer self.allocator.free(duped);
                     try self.openFile(duped);
                 }
+                self.explorer.ensureVisible(view_h);
             },
-            .left => try self.explorer.collapseOrParent(),
+            .left => try self.explorer.collapseOrParent(view_h),
             .char => |ch| {
-                if (ch == '.') {
+                if (ch == 'j') {
+                    self.explorer.moveDown(view_h);
+                } else if (ch == 'k') {
+                    self.explorer.moveUp(view_h);
+                } else if (ch == 'g') {
+                    self.explorer.moveHome(view_h);
+                } else if (ch == 'G') {
+                    self.explorer.moveEnd(view_h);
+                } else if (ch == ' ') {
+                    if (try self.explorer.activateSelected()) |file_path| {
+                        const duped = try self.allocator.dupe(u8, file_path);
+                        defer self.allocator.free(duped);
+                        try self.openFile(duped);
+                    }
+                    self.explorer.ensureVisible(view_h);
+                } else if (ch == '.') {
                     try self.explorer.toggleHidden();
+                    self.explorer.ensureVisible(view_h);
                     self.setStatus(if (self.explorer.show_hidden) "Explorer: showing hidden files" else "Explorer: hiding dotfiles", false);
                 } else if (ch == 'r') {
                     try self.explorer.refresh();
+                    self.explorer.ensureVisible(view_h);
                     self.setStatus("Explorer refreshed", false);
                 }
             },
@@ -1247,9 +1291,11 @@ pub const Editor = struct {
         const size = self.term.getSize();
         const buf = self.activeBuf();
 
+        const view_h = if (self.last_editor_rows > 1) self.last_editor_rows - 1 else 1;
+
         if (m.kind == .scroll_up) {
             if (self.explorer.visible and m.x < self.explorer.width) {
-                self.explorer.scroll -|= 3;
+                self.explorer.scrollBy(-3, view_h);
             } else {
                 buf.scroll_row -|= 3;
             }
@@ -1257,9 +1303,7 @@ pub const Editor = struct {
         }
         if (m.kind == .scroll_down) {
             if (self.explorer.visible and m.x < self.explorer.width) {
-                if (self.explorer.scroll + 3 < self.explorer.entries.items.len) {
-                    self.explorer.scroll += 3;
-                }
+                self.explorer.scrollBy(3, view_h);
             } else {
                 const max_scroll = if (buf.lineCount() > 1) buf.lineCount() - 1 else 0;
                 buf.scroll_row = @min(buf.scroll_row + 3, max_scroll);
@@ -1295,16 +1339,27 @@ pub const Editor = struct {
 
         // Click in sidebar
         if (m.kind == .press and self.explorer.visible and size.cols >= 50 and m.x < self.explorer.width) {
+            self.explorer.focused = true;
+            self.panel = .none;
+            if (m.y == 1) {
+                // Click on EXPLORER header: focus sidebar and scroll buttons if clicked near right edge
+                if (m.x + 4 >= self.explorer.width) {
+                    self.explorer.pageDown(view_h);
+                } else if (m.x + 8 >= self.explorer.width) {
+                    self.explorer.pageUp(view_h);
+                }
+                return;
+            }
             if (m.y >= 2 and m.y < 1 + self.last_editor_rows) {
                 const idx = self.explorer.scroll + (m.y - 2);
                 if (idx < self.explorer.entries.items.len) {
                     self.explorer.selected = idx;
-                    self.explorer.focused = true;
                     if (try self.explorer.activateSelected()) |path| {
                         const duped = try self.allocator.dupe(u8, path);
                         defer self.allocator.free(duped);
                         try self.openFile(duped);
                     }
+                    self.explorer.ensureVisible(view_h);
                 }
             }
             return;
@@ -1513,7 +1568,7 @@ pub const Editor = struct {
         const bracket_match = findMatchingBracket(buf, buf.cursor);
 
         if (show_sidebar) {
-            self.explorer.ensureVisible(if (ed_rows > 1) ed_rows - 1 else 1);
+            self.explorer.clampScroll(if (ed_rows > 1) ed_rows - 1 else 1);
         }
 
         // 3. Render Workspace Rows (Sidebar + Code Area)
@@ -1522,7 +1577,7 @@ pub const Editor = struct {
             try w.print("\x1b[{d};1H", .{screen_row + 2});
 
             if (show_sidebar) {
-                try self.renderSidebarRow(w, screen_row, sidebar_w);
+                try self.renderSidebarRow(w, screen_row, sidebar_w, if (ed_rows > 1) ed_rows - 1 else 1);
                 // Explicitly position vertical separator at sidebar_w + 1 so wide characters never shift the border
                 try w.print("\x1b[{d};{d}H\x1b[48;2;24;24;37m\x1b[38;2;69;71;90m│", .{ screen_row + 2, sidebar_w + 1 });
             }
@@ -1610,18 +1665,25 @@ pub const Editor = struct {
         if (col < cols) try writeSpaces(w, cols - col);
     }
 
-    fn renderSidebarRow(self: *Editor, w: anytype, row: usize, width: usize) !void {
+    fn renderSidebarRow(self: *Editor, w: anytype, row: usize, width: usize, view_h: usize) !void {
         if (row == 0) {
-            // Explorer header
+            // Explorer header with scroll indicator
             if (self.explorer.focused) {
                 try w.writeAll("\x1b[48;2;49;50;68m\x1b[1m\x1b[38;2;137;180;250m");
             } else {
                 try w.writeAll("\x1b[48;2;24;24;37m\x1b[1m\x1b[38;2;147;153;178m");
             }
-            const title = if (self.explorer.show_hidden) " EXPLORER [all]" else " EXPLORER";
-            const n = @min(title.len, width);
-            try w.writeAll(title[0..n]);
-            try writeSpaces(w, width - n);
+            var hdr_buf: [64]u8 = undefined;
+            const total = self.explorer.entries.items.len;
+            const title = if (total > view_h)
+                std.fmt.bufPrint(&hdr_buf, " EXPLORER ({d}/{d}) ▲▼", .{ self.explorer.selected + 1, total }) catch " EXPLORER"
+            else if (self.explorer.show_hidden)
+                " EXPLORER [all]"
+            else
+                " EXPLORER";
+            const fit = sliceFittingColumns(title, width);
+            try w.writeAll(title[0..fit.bytes]);
+            try writeSpaces(w, width - fit.cols);
             try w.writeAll("\x1b[0m");
             return;
         }
