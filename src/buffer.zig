@@ -1,4 +1,6 @@
 const std = @import("std");
+const Enc = @import("encoding.zig");
+pub const Encoding = Enc.Encoding;
 
 pub const LineCol = struct {
     line: usize,
@@ -47,6 +49,8 @@ pub const TextBuffer = struct {
 
     saved_undo_len: ?usize,
     crlf: bool,
+    encoding: Encoding,
+    encoding_locked: bool,
     path: ?[]u8,
     untitled_id: usize,
 
@@ -78,6 +82,8 @@ pub const TextBuffer = struct {
             .last_edit_time_ms = 0,
             .saved_undo_len = 0,
             .crlf = false,
+            .encoding = .utf8,
+            .encoding_locked = false,
             .path = null,
             .untitled_id = untitled_id,
             .cursor = 0,
@@ -98,11 +104,15 @@ pub const TextBuffer = struct {
         if (self.path) |p| self.allocator.free(p);
     }
 
-    pub fn loadFile(allocator: std.mem.Allocator, file_path: []const u8) !TextBuffer {
+    pub fn loadFile(allocator: std.mem.Allocator, file_path: []const u8, forced_encoding: ?Encoding) !TextBuffer {
         var buf = try TextBuffer.init(allocator, 0);
         errdefer buf.deinit();
 
         buf.path = try allocator.dupe(u8, file_path);
+        if (forced_encoding) |fe| {
+            buf.encoding = fe;
+            buf.encoding_locked = true;
+        }
 
         const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
             if (err == error.FileNotFound) {
@@ -116,19 +126,26 @@ pub const TextBuffer = struct {
         const raw = try file.readToEndAlloc(allocator, 128 * 1024 * 1024);
         defer allocator.free(raw);
 
+        const enc = forced_encoding orelse Enc.detect(raw);
+        buf.encoding = enc;
+        buf.encoding_locked = (forced_encoding != null);
+
+        const utf8 = try Enc.decodeToUtf8(allocator, raw, enc);
+        defer allocator.free(utf8);
+
         // Detect CRLF and normalize to LF in memory
         var has_crlf = false;
         var norm = std.ArrayList(u8).init(allocator);
         defer norm.deinit();
-        try norm.ensureTotalCapacity(raw.len);
+        try norm.ensureTotalCapacity(utf8.len);
 
         var i: usize = 0;
-        while (i < raw.len) : (i += 1) {
-            if (raw[i] == '\r' and i + 1 < raw.len and raw[i + 1] == '\n') {
+        while (i < utf8.len) : (i += 1) {
+            if (utf8[i] == '\r' and i + 1 < utf8.len and utf8[i + 1] == '\n') {
                 has_crlf = true;
                 continue;
             }
-            try norm.append(raw[i]);
+            try norm.append(utf8[i]);
         }
 
         buf.crlf = has_crlf;
@@ -139,35 +156,73 @@ pub const TextBuffer = struct {
         return buf;
     }
 
-    pub fn save(self: *TextBuffer) !void {
-        const file_path = self.path orelse return error.NoFilePath;
-        const file = try std.fs.cwd().createFile(file_path, .{ .truncate = true });
-        defer file.close();
+    /// Locks the buffer to `new_enc`. If the buffer has a file on disk and no unsaved edits,
+    /// reloads the raw file from disk decoded with `new_enc`; otherwise keeps current text and
+    /// marks the buffer modified so the next save writes in `new_enc`.
+    pub fn applyEncoding(self: *TextBuffer, new_enc: Encoding) !bool {
+        self.encoding = new_enc;
+        self.encoding_locked = true;
 
-        var buffered = std.io.bufferedWriter(file.writer());
-        const w = buffered.writer();
+        if (self.path) |p| {
+            if (!self.isModified()) {
+                if (std.fs.cwd().openFile(p, .{})) |file| {
+                    defer file.close();
+                    const raw = try file.readToEndAlloc(self.allocator, 128 * 1024 * 1024);
+                    defer self.allocator.free(raw);
 
-        if (!self.crlf) {
-            try w.writeAll(self.data[0..self.gap_start]);
-            try w.writeAll(self.data[self.gap_end..self.data.len]);
-        } else {
-            try writeWithCrlf(w, self.data[0..self.gap_start]);
-            try writeWithCrlf(w, self.data[self.gap_end..self.data.len]);
+                    const utf8 = try Enc.decodeToUtf8(self.allocator, raw, new_enc);
+                    defer self.allocator.free(utf8);
+
+                    var has_crlf = false;
+                    var norm = std.ArrayList(u8).init(self.allocator);
+                    defer norm.deinit();
+                    try norm.ensureTotalCapacity(utf8.len);
+
+                    var i: usize = 0;
+                    while (i < utf8.len) : (i += 1) {
+                        if (utf8[i] == '\r' and i + 1 < utf8.len and utf8[i + 1] == '\n') {
+                            has_crlf = true;
+                            continue;
+                        }
+                        try norm.append(utf8[i]);
+                    }
+
+                    // Reset buffer contents & undo history cleanly
+                    self.gap_start = 0;
+                    self.gap_end = self.data.len;
+                    self.lines_dirty = true;
+                    for (self.undo_stack.items) |op| self.allocator.free(op.text);
+                    self.undo_stack.clearRetainingCapacity();
+                    for (self.redo_stack.items) |op| self.allocator.free(op.text);
+                    self.redo_stack.clearRetainingCapacity();
+
+                    self.crlf = has_crlf;
+                    try self.insertRaw(0, norm.items);
+                    self.saved_undo_len = 0;
+                    self.cursor = @min(self.cursor, self.len());
+                    self.anchor = null;
+                    self.ensureLineIndex();
+                    return true; // reloaded from disk
+                } else |_| {}
+            }
         }
-        try buffered.flush();
-        self.saved_undo_len = self.undo_stack.items.len;
+        // Buffer has unsaved edits or is untitled: mark modified so Ctrl+S writes new encoding
+        self.saved_undo_len = null;
+        return false;
     }
 
-    fn writeWithCrlf(writer: anytype, slice: []const u8) !void {
-        var start: usize = 0;
-        while (std.mem.indexOfScalarPos(u8, slice, start, '\n')) |nl| {
-            try writer.writeAll(slice[start..nl]);
-            try writer.writeAll("\r\n");
-            start = nl + 1;
-        }
-        if (start < slice.len) {
-            try writer.writeAll(slice[start..]);
-        }
+    pub fn save(self: *TextBuffer) !void {
+        const file_path = self.path orelse return error.NoFilePath;
+        const utf8 = try self.toOwnedSlice(self.allocator);
+        defer self.allocator.free(utf8);
+
+        const encoded = try Enc.encodeFromUtf8(self.allocator, utf8, self.encoding, self.crlf);
+        defer self.allocator.free(encoded);
+
+        const file = try std.fs.cwd().createFile(file_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(encoded);
+        self.saved_undo_len = self.undo_stack.items.len;
     }
 
     pub fn setPath(self: *TextBuffer, new_path: []const u8) !void {

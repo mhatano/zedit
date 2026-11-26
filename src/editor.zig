@@ -2,6 +2,7 @@ const std = @import("std");
 const BufferMod = @import("buffer.zig");
 const Buffer = BufferMod.TextBuffer;
 const Range = BufferMod.Range;
+const Encoding = BufferMod.Encoding;
 const Syntax = @import("syntax.zig");
 const Regex = @import("regex.zig").Regex;
 const Match = @import("regex.zig").Match;
@@ -22,6 +23,7 @@ pub const PanelMode = enum {
     prompt_open,
     prompt_save_as,
     prompt_goto,
+    prompt_encoding,
 };
 
 const TabHit = struct {
@@ -44,6 +46,10 @@ pub const Editor = struct {
     clear_screen_on_render: bool,
     quit_confirm: bool,
     close_confirm: bool,
+
+    // Encoding auto-detect vs manual lock
+    forced_encoding: ?Encoding,
+    encoding_picker_idx: usize,
 
     // Clipboard
     clipboard: std.ArrayList(u8),
@@ -98,6 +104,8 @@ pub const Editor = struct {
             .clear_screen_on_render = true,
             .quit_confirm = false,
             .close_confirm = false,
+            .forced_encoding = null,
+            .encoding_picker_idx = 0,
             .clipboard = std.ArrayList(u8).init(allocator),
             .status_msg = undefined,
             .status_msg_len = 0,
@@ -132,7 +140,7 @@ pub const Editor = struct {
 
         if (initial_files.len == 0) {
             try ed.newBuffer();
-            ed.setStatus("zedit ready — Ctrl+O Open │ Ctrl+F Find │ Ctrl+B Tree │ Ctrl+S Save │ Ctrl+Q Quit", false);
+            ed.setStatus("zedit ready — ^O Open │ ^F Find │ ^B Tree │ ^U/F2 Encoding │ ^S Save │ ^Q Quit", false);
         } else {
             for (initial_files) |arg| {
                 // Check if arg is a directory
@@ -228,7 +236,11 @@ pub const Editor = struct {
     // --- Buffer / Tab Management ---
 
     fn newBuffer(self: *Editor) !void {
-        const b = try Buffer.init(self.allocator, self.next_untitled_id);
+        var b = try Buffer.init(self.allocator, self.next_untitled_id);
+        if (self.forced_encoding) |fe| {
+            b.encoding = fe;
+            b.encoding_locked = true;
+        }
         self.next_untitled_id += 1;
         try self.buffers.append(b);
         self.active_idx = self.buffers.items.len - 1;
@@ -243,14 +255,14 @@ pub const Editor = struct {
                 if (std.mem.eql(u8, p, path)) {
                     self.active_idx = idx;
                     self.explorer.focused = false;
-                    self.setStatusFmt(false, "Switched to {s}", .{b.displayName()});
+                    self.setStatusFmt(false, "Switched to {s} [{s}]", .{ b.displayName(), b.encoding.name() });
                     try self.refreshSearchIfActive();
                     return;
                 }
             }
         }
 
-        const loaded = Buffer.loadFile(self.allocator, path) catch |err| {
+        const loaded = Buffer.loadFile(self.allocator, path, self.forced_encoding) catch |err| {
             self.setStatusFmt(true, "Failed to open {s}: {s}", .{ path, @errorName(err) });
             return;
         };
@@ -269,7 +281,9 @@ pub const Editor = struct {
             self.active_idx = self.buffers.items.len - 1;
         }
         self.explorer.focused = false;
-        self.setStatusFmt(false, "Opened {s} ({d} lines)", .{ self.activeBuf().displayName(), self.activeBuf().lineCount() });
+        const ab = self.activeBuf();
+        const lock_tag = if (ab.encoding_locked) "locked" else "auto";
+        self.setStatusFmt(false, "Opened {s} ({d} lines, {s} [{s}])", .{ ab.displayName(), ab.lineCount(), ab.encoding.name(), lock_tag });
         try self.refreshSearchIfActive();
     }
 
@@ -284,7 +298,7 @@ pub const Editor = struct {
             self.setStatusFmt(true, "Save failed: {s}", .{@errorName(err)});
             return;
         };
-        self.setStatusFmt(false, "Saved {s} ({d} lines)", .{ buf.displayName(), buf.lineCount() });
+        self.setStatusFmt(false, "Saved {s} ({d} lines, {s})", .{ buf.displayName(), buf.lineCount(), buf.encoding.name() });
         self.explorer.refresh() catch {};
     }
 
@@ -382,6 +396,12 @@ pub const Editor = struct {
                         try self.openFindPanel(true);
                         return;
                     },
+                    'u' => {
+                        if (self.panel == .none or self.panel == .prompt_encoding) {
+                            self.openEncodingPanel();
+                            return;
+                        }
+                    },
                     else => {},
                 },
                 .tab => {
@@ -399,7 +419,7 @@ pub const Editor = struct {
             }
         }
 
-        // Alt shortcuts (tab switching, sidebar scrolling, search toggles)
+        // Alt shortcuts (tab switching, sidebar scrolling, encoding picker, search toggles)
         if (k.alt and !k.ctrl) {
             const view_h = if (self.last_editor_rows > 1) self.last_editor_rows - 1 else 1;
             switch (k.code) {
@@ -446,12 +466,21 @@ pub const Editor = struct {
                         }
                         return;
                     }
+                    const lo = std.ascii.toLower(@intCast(@min(ch, 127)));
+                    if (lo == 'e') {
+                        self.openEncodingPanel();
+                        return;
+                    }
                 },
                 else => {},
             }
         }
 
-        // F3 / Shift+F3 search navigation anywhere
+        // F1 / F2 / F3 global function keys
+        if (k.code == .f2) {
+            self.openEncodingPanel();
+            return;
+        }
         if (k.code == .f3) {
             if (self.matches.items.len > 0) {
                 self.jumpMatch(!k.shift);
@@ -459,7 +488,7 @@ pub const Editor = struct {
             return;
         }
         if (k.code == .f1) {
-            self.setStatus("Keys: ^S Save │ ^O Open │ ^N New │ ^W Close │ ^F Find │ ^H Replace │ ^B/^E Tree (Alt+↑/↓) │ Alt+←/→ Tabs │ ^Q Quit", false);
+            self.setStatus("Keys: ^S Save │ ^O Open │ ^U/F2 Encoding │ ^F Find │ ^H Replace │ ^B/^E Tree │ Alt+←/→ Tabs │ ^Q Quit", false);
             return;
         }
 
@@ -473,6 +502,62 @@ pub const Editor = struct {
             return;
         }
         try self.handleEditorKey(k);
+    }
+
+    pub fn openEncodingPanel(self: *Editor) void {
+        self.explorer.focused = false;
+        self.panel = .prompt_encoding;
+        self.prompt_input.clearRetainingCapacity();
+        const cur = self.activeBuf().encoding;
+        // 0 = Auto-detect, 1..7 = Encoding.all[0..6]
+        if (!self.activeBuf().encoding_locked and self.forced_encoding == null) {
+            self.encoding_picker_idx = 0;
+        } else {
+            for (Encoding.all, 0..) |e, i| {
+                if (e == cur) {
+                    self.encoding_picker_idx = i + 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn applyEncodingChoice(self: *Editor, choice_idx: usize) !void {
+        const buf = self.activeBuf();
+        self.panel = .none;
+
+        if (choice_idx == 0) {
+            // Auto-detect mode (unlock encoding)
+            self.forced_encoding = null;
+            buf.encoding_locked = false;
+            if (buf.path) |p| {
+                if (!buf.isModified()) {
+                    if (std.fs.cwd().openFile(p, .{})) |file| {
+                        defer file.close();
+                        const raw = try file.readToEndAlloc(self.allocator, 128 * 1024 * 1024);
+                        defer self.allocator.free(raw);
+                        const detected = @import("encoding.zig").detect(raw);
+                        _ = try buf.applyEncoding(detected);
+                        buf.encoding_locked = false;
+                        try self.refreshSearchIfActive();
+                        self.setStatusFmt(false, "Encoding auto-detected: {s}", .{buf.encoding.name()});
+                        return;
+                    } else |_| {}
+                }
+            }
+            self.setStatusFmt(false, "Encoding set to Auto ({s})", .{buf.encoding.name()});
+            return;
+        }
+
+        const enc = Encoding.all[@min(choice_idx - 1, Encoding.all.len - 1)];
+        self.forced_encoding = enc;
+        const reloaded = try buf.applyEncoding(enc);
+        try self.refreshSearchIfActive();
+        if (reloaded) {
+            self.setStatusFmt(false, "Encoding locked to {s} (reloaded from disk)", .{enc.name()});
+        } else {
+            self.setStatusFmt(false, "Encoding locked to {s} (will save in {s})", .{ enc.name(), enc.name() });
+        }
     }
 
     fn handleExplorerKey(self: *Editor, k: Term.KeyEvent) !void {
@@ -601,6 +686,28 @@ pub const Editor = struct {
                     return;
                 }
                 _ = try editLineInput(&self.prompt_input, k);
+            },
+            .prompt_encoding => {
+                const total_choices = Encoding.all.len + 1; // 0=Auto, 1..7=Encodings
+                switch (k.code) {
+                    .left, .up => {
+                        self.encoding_picker_idx = if (self.encoding_picker_idx == 0) total_choices - 1 else self.encoding_picker_idx - 1;
+                    },
+                    .right, .down, .tab => {
+                        self.encoding_picker_idx = (self.encoding_picker_idx + 1) % total_choices;
+                    },
+                    .enter => {
+                        try self.applyEncodingChoice(self.encoding_picker_idx);
+                    },
+                    .char => |ch| {
+                        if (ch == '0' or ch == 'a' or ch == 'A') {
+                            try self.applyEncodingChoice(0);
+                        } else if (ch >= '1' and ch <= '7') {
+                            try self.applyEncodingChoice(@intCast(ch - '0'));
+                        }
+                    },
+                    else => {},
+                }
             },
             .none => {},
         }
@@ -1033,7 +1140,7 @@ pub const Editor = struct {
                 .find => &self.find_input,
                 .replace => if (self.panel_focus_replace) &self.replace_input else &self.find_input,
                 .prompt_open, .prompt_save_as, .prompt_goto => &self.prompt_input,
-                .none => return,
+                .prompt_encoding, .none => return,
             };
             try target.appendSlice(raw[0..nl]);
             if (target == &self.find_input) try self.runSearch(true);
@@ -1365,6 +1472,14 @@ pub const Editor = struct {
             return;
         }
 
+        // Click on bottom status bar (y == size.rows - 1): open encoding picker when clicking right side
+        if (m.kind == .press and m.y + 1 == size.rows) {
+            if (size.cols > 30 and m.x + 30 >= size.cols) {
+                self.openEncodingPanel();
+                return;
+            }
+        }
+
         // Click / drag inside editor viewport
         if (m.y >= 1 and m.y < 1 + self.last_editor_rows and m.x >= self.last_editor_x + self.last_gutter_w) {
             self.explorer.focused = false;
@@ -1453,7 +1568,7 @@ pub const Editor = struct {
     fn panelRows(self: *const Editor) usize {
         return switch (self.panel) {
             .none => 0,
-            .find, .prompt_open, .prompt_save_as, .prompt_goto => 1,
+            .find, .prompt_open, .prompt_save_as, .prompt_goto, .prompt_encoding => 1,
             .replace => 2,
         };
     }
@@ -1992,6 +2107,39 @@ pub const Editor = struct {
                 const used = label.len + p_fit.cols;
                 if (used < cols) try writeSpaces(w, cols - used);
             },
+            .prompt_encoding => {
+                const prefix = " Encoding (←/→/0-7 Enter): ";
+                try w.writeAll("\x1b[38;2;249;226;175m");
+                const pre_fit = sliceFittingColumns(prefix, cols);
+                try w.writeAll(prefix[0..pre_fit.bytes]);
+                var used = pre_fit.cols;
+
+                const labels = [_][]const u8{
+                    "0:Auto",
+                    "1:UTF-8",
+                    "2:UTF-8 BOM",
+                    "3:Shift_JIS",
+                    "4:EUC-JP",
+                    "5:ISO-2022-JP",
+                    "6:UTF-16LE",
+                    "7:UTF-16BE",
+                };
+                for (labels, 0..) |lbl, idx| {
+                    const needed = lbl.len + 3; // " [lbl]" or "  lbl "
+                    if (used + needed > cols) break;
+                    if (idx == self.encoding_picker_idx) {
+                        try w.writeAll(" \x1b[48;2;137;180;250m\x1b[38;2;17;17;27m\x1b[1m ");
+                        try w.writeAll(lbl);
+                        try w.writeAll(" \x1b[0m\x1b[48;2;24;24;37m");
+                    } else {
+                        try w.writeAll(" \x1b[38;2;186;194;222m ");
+                        try w.writeAll(lbl);
+                        try w.writeByte(' ');
+                    }
+                    used += needed;
+                }
+                if (used < cols) try writeSpaces(w, cols - used);
+            },
             .none => {},
         }
         try w.writeAll("\x1b[0m");
@@ -2011,6 +2159,8 @@ pub const Editor = struct {
 
         const mode_badge = if (self.panel == .find or self.panel == .replace)
             " FIND "
+        else if (self.panel == .prompt_encoding)
+            " ENCODING "
         else if (self.panel != .none)
             " PROMPT "
         else if (self.explorer.focused)
@@ -2029,15 +2179,16 @@ pub const Editor = struct {
         try w.writeAll(mode_badge);
         try w.writeAll("\x1b[0m\x1b[48;2;17;17;27m ");
 
-        var right_buf: [128]u8 = undefined;
+        var right_buf: [160]u8 = undefined;
         const eol = if (buf.crlf) "CRLF" else "LF";
+        const enc_mode = if (buf.encoding_locked or self.forced_encoding != null) "Lock" else "Auto";
         const right_str = if (sel) |s|
-            std.fmt.bufPrint(&right_buf, "Sel {d} │ Ln {d}, Col {d} │ {s} │ {s} ", .{
-                s.end - s.start, lc.line + 1, lc.col + 1, eol, lang.name(),
+            std.fmt.bufPrint(&right_buf, "Sel {d} │ Ln {d}, Col {d} │ {s}({s}) │ {s} │ {s} ", .{
+                s.end - s.start, lc.line + 1, lc.col + 1, buf.encoding.name(), enc_mode, eol, lang.name(),
             }) catch ""
         else
-            std.fmt.bufPrint(&right_buf, "Ln {d}, Col {d} │ {s} │ {s} ", .{
-                lc.line + 1, lc.col + 1, eol, lang.name(),
+            std.fmt.bufPrint(&right_buf, "Ln {d}, Col {d} │ {s}({s}) │ {s} │ {s} ", .{
+                lc.line + 1, lc.col + 1, buf.encoding.name(), enc_mode, eol, lang.name(),
             }) catch "";
 
         const right_cols = strDisplayWidth(right_str);
@@ -2112,6 +2263,9 @@ pub const Editor = struct {
                 .prompt_goto => {
                     const cx = @min(20 + strDisplayWidth(self.prompt_input.items), size.cols);
                     try w.print("\x1b[{d};{d}H\x1b[?25h", .{ start_row, cx });
+                },
+                .prompt_encoding => {
+                    // Cursor hidden while choosing encoding pill
                 },
                 .none => {},
             }

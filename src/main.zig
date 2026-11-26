@@ -54,6 +54,7 @@ fn printHelp() !void {
         \\  Ctrl+F            Incremental search (Alt+R Regex, Alt+C Case, F3/Shift+F3 Next/Prev)
         \\  Ctrl+H            Incremental search & replace (Tab switch, Enter replace, Alt+A all)
         \\  Ctrl+G            Go to line[:col]
+        \\  Ctrl+U / F2       Select & lock file encoding (Auto, UTF-8, Shift_JIS, EUC-JP, ISO-2022-JP, UTF-16)
         \\  Ctrl+Z / Ctrl+Y   Undo / Redo (Ctrl+Shift+Z also Redo)
         \\  Ctrl+C / X / V    Copy / Cut / Paste (with OSC 52 clipboard sync)
         \\  Ctrl+A            Select all
@@ -66,6 +67,7 @@ fn printHelp() !void {
 }
 
 test {
+    _ = @import("encoding.zig");
     _ = @import("buffer.zig");
     _ = @import("regex.zig");
     _ = @import("syntax.zig");
