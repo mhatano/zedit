@@ -1342,9 +1342,9 @@ pub const Editor = struct {
                 vcol += TAB_WIDTH - (vcol % TAB_WIDTH);
                 i += 1;
             } else {
-                const seq = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-                vcol += 1;
-                i += @min(seq, limit - i);
+                const dec = decodeCharWidth(text[i..limit]);
+                vcol += dec.width;
+                i += dec.byte_len;
             }
         }
         return vcol;
@@ -1362,9 +1362,10 @@ pub const Editor = struct {
                 vcol = next_v;
                 i += 1;
             } else {
-                const seq = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-                vcol += 1;
-                i += @min(seq, text.len - i);
+                const dec = decodeCharWidth(text[i..]);
+                if (vcol + dec.width > target_vcol) break;
+                vcol += dec.width;
+                i += dec.byte_len;
             }
         }
         return i;
@@ -1389,8 +1390,8 @@ pub const Editor = struct {
 
         if (vcol < buf.scroll_col) {
             buf.scroll_col = vcol;
-        } else if (vcol >= buf.scroll_col + ed_cols) {
-            buf.scroll_col = vcol - ed_cols + 1;
+        } else if (vcol + 2 > buf.scroll_col + ed_cols) {
+            buf.scroll_col = (vcol + 2) - ed_cols;
         }
     }
 
@@ -1495,7 +1496,9 @@ pub const Editor = struct {
         if (cursor_lc.line < buf.scroll_row) buf.scroll_row = cursor_lc.line;
         if (cursor_lc.line >= buf.scroll_row + ed_rows) buf.scroll_row = cursor_lc.line - ed_rows + 1;
         if (cursor_vcol < buf.scroll_col) buf.scroll_col = cursor_vcol;
-        if (cursor_vcol >= buf.scroll_col + code_w) buf.scroll_col = cursor_vcol - code_w + 1;
+        if (cursor_vcol + 2 > buf.scroll_col + code_w and code_w >= 2) {
+            buf.scroll_col = (cursor_vcol + 2) - code_w;
+        }
 
         // 1. Render Top Tab Bar (row 0)
         try self.renderTabBar(w, size.cols);
@@ -1520,8 +1523,8 @@ pub const Editor = struct {
 
             if (show_sidebar) {
                 try self.renderSidebarRow(w, screen_row, sidebar_w);
-                // Vertical separator
-                try w.writeAll("\x1b[48;2;24;24;37m\x1b[38;2;69;71;90m│");
+                // Explicitly position vertical separator at sidebar_w + 1 so wide characters never shift the border
+                try w.print("\x1b[{d};{d}H\x1b[48;2;24;24;37m\x1b[38;2;69;71;90m│", .{ screen_row + 2, sidebar_w + 1 });
             }
 
             const doc_line = buf.scroll_row + screen_row;
@@ -1570,9 +1573,10 @@ pub const Editor = struct {
             const is_active = (idx == self.active_idx);
             const name = b.displayName();
             const mod = b.isModified();
+            const name_w = strDisplayWidth(name);
 
             // Format: " name ● × " or " name × "
-            const tab_len = 1 + name.len + (if (mod) @as(usize, 2) else 0) + 3;
+            const tab_len = 1 + name_w + (if (mod) @as(usize, 2) else 0) + 3;
             if (col + tab_len > cols) break;
 
             const x_start = col;
@@ -1658,10 +1662,10 @@ pub const Editor = struct {
             }
         }
 
-        const avail = width - used;
-        const name_len = @min(entry.name.len, avail);
-        try w.writeAll(entry.name[0..name_len]);
-        used += name_len;
+        const avail = if (entry.is_dir and width > used + 1) width - used - 1 else width - used;
+        const fit = sliceFittingColumns(entry.name, avail);
+        try w.writeAll(entry.name[0..fit.bytes]);
+        used += fit.cols;
         if (entry.is_dir and used < width) {
             try w.writeByte('/');
             used += 1;
@@ -1772,18 +1776,43 @@ pub const Editor = struct {
                 }
                 i += 1;
             } else {
-                const seq_len = std.unicode.utf8ByteSequenceLength(line[i]) catch 1;
-                const safe_len = @min(seq_len, line.len - i);
-                if (vcol >= buf.scroll_col) {
-                    try emitColors(w, fg, bg, &last_fg, &last_bg);
-                    if (safe_len == 1 and line[i] < 0x20) {
-                        try w.writeByte('?');
-                    } else {
-                        try w.writeAll(line[i .. i + safe_len]);
-                    }
-                    drawn += 1;
+                const dec = decodeCharWidth(line[i..]);
+                const cw = dec.width;
+                const safe_len = dec.byte_len;
+
+                if (vcol + cw <= buf.scroll_col) {
+                    // Character is completely to the left of horizontal scroll offset
+                    vcol += cw;
+                    i += safe_len;
+                    continue;
                 }
-                vcol += 1;
+
+                if (vcol < buf.scroll_col) {
+                    // Wide character straddles the left scroll boundary: emit a space for its right half
+                    try emitColors(w, fg, bg, &last_fg, &last_bg);
+                    try w.writeByte(' ');
+                    drawn += 1;
+                    vcol += cw;
+                    i += safe_len;
+                    continue;
+                }
+
+                if (drawn + cw > code_w) {
+                    // Wide character does not fit in the remaining 1 column at the right edge
+                    try emitColors(w, fg, bg, &last_fg, &last_bg);
+                    try writeSpaces(w, code_w - drawn);
+                    drawn = code_w;
+                    break;
+                }
+
+                try emitColors(w, fg, bg, &last_fg, &last_bg);
+                if (safe_len == 1 and line[i] < 0x20) {
+                    try w.writeByte('?');
+                } else {
+                    try w.writeAll(line[i .. i + safe_len]);
+                }
+                drawn += cw;
+                vcol += cw;
                 i += safe_len;
             }
         }
@@ -1855,9 +1884,9 @@ pub const Editor = struct {
                 try w.writeAll("\x1b[38;2;137;180;250m");
                 try w.writeAll(label);
                 try w.writeAll("\x1b[38;2;205;214;244m");
-                const q_show = @min(self.find_input.items.len, if (cols > label.len + 10) cols - label.len - 10 else 0);
-                try w.writeAll(self.find_input.items[0..q_show]);
-                var used = label.len + q_show;
+                const q_fit = sliceFittingColumns(self.find_input.items, if (cols > label.len + 10) cols - label.len - 10 else 0);
+                try w.writeAll(self.find_input.items[0..q_fit.bytes]);
+                var used = label.len + q_fit.cols;
 
                 if (self.search_err) {
                     try w.writeAll("\x1b[38;2;243;139;168m");
@@ -1876,9 +1905,9 @@ pub const Editor = struct {
                     try w.writeAll("\x1b[38;2;166;227;161m");
                     try w.writeAll(rlabel);
                     try w.writeAll("\x1b[38;2;205;214;244m");
-                    const rep_show = @min(self.replace_input.items.len, if (cols > rlabel.len + 10) cols - rlabel.len - 10 else 0);
-                    try w.writeAll(self.replace_input.items[0..rep_show]);
-                    var rused = rlabel.len + rep_show;
+                    const rep_fit = sliceFittingColumns(self.replace_input.items, if (cols > rlabel.len + 10) cols - rlabel.len - 10 else 0);
+                    try w.writeAll(self.replace_input.items[0..rep_fit.bytes]);
+                    var rused = rlabel.len + rep_fit.cols;
                     try w.writeAll("\x1b[38;2;147;153;178m");
                     const h_show = @min(hint.len, if (cols > rused) cols - rused else 0);
                     try w.writeAll(hint[0..h_show]);
@@ -1896,9 +1925,9 @@ pub const Editor = struct {
                 try w.writeAll("\x1b[38;2;249;226;175m");
                 try w.writeAll(label);
                 try w.writeAll("\x1b[38;2;205;214;244m");
-                const p_show = @min(self.prompt_input.items.len, if (cols > label.len + 2) cols - label.len - 2 else 0);
-                try w.writeAll(self.prompt_input.items[0..p_show]);
-                const used = label.len + p_show;
+                const p_fit = sliceFittingColumns(self.prompt_input.items, if (cols > label.len + 2) cols - label.len - 2 else 0);
+                try w.writeAll(self.prompt_input.items[0..p_fit.bytes]);
+                const used = label.len + p_fit.cols;
                 if (used < cols) try writeSpaces(w, cols - used);
             },
             .none => {},
@@ -1949,32 +1978,33 @@ pub const Editor = struct {
                 lc.line + 1, lc.col + 1, eol, lang.name(),
             }) catch "";
 
+        const right_cols = strDisplayWidth(right_str);
         const used_left_prefix = mode_badge.len + 1;
-        const max_mid = if (cols > used_left_prefix + right_str.len + 1) cols - used_left_prefix - right_str.len - 1 else 0;
+        const max_mid = if (cols > used_left_prefix + right_cols + 1) cols - used_left_prefix - right_cols - 1 else 0;
 
-        var mid_len: usize = 0;
+        var mid_cols: usize = 0;
         if (self.status_msg_len > 0) {
             if (self.status_is_err) {
                 try w.writeAll("\x1b[38;2;243;139;168m");
             } else {
                 try w.writeAll("\x1b[38;2;166;227;161m");
             }
-            const show = @min(self.status_msg_len, max_mid);
-            try w.writeAll(self.status_msg[0..show]);
-            mid_len = show;
+            const fit = sliceFittingColumns(self.status_msg[0..self.status_msg_len], max_mid);
+            try w.writeAll(self.status_msg[0..fit.bytes]);
+            mid_cols = fit.cols;
         } else {
             try w.writeAll("\x1b[38;2;166;173;200m");
             const path_str = buf.path orelse buf.displayName();
-            const show = @min(path_str.len, max_mid);
-            try w.writeAll(path_str[0..show]);
-            mid_len = show;
+            const fit = sliceFittingColumns(path_str, max_mid);
+            try w.writeAll(path_str[0..fit.bytes]);
+            mid_cols = fit.cols;
         }
 
-        const total_left = used_left_prefix + mid_len;
-        if (cols > total_left + right_str.len) {
-            try writeSpaces(w, cols - total_left - right_str.len);
+        const total_left = used_left_prefix + mid_cols;
+        if (cols > total_left + right_cols) {
+            try writeSpaces(w, cols - total_left - right_cols);
         }
-        if (cols >= total_left + right_str.len) {
+        if (cols >= total_left + right_cols) {
             try w.writeAll("\x1b[38;2;147;153;178m");
             try w.writeAll(right_str);
         }
@@ -1997,28 +2027,28 @@ pub const Editor = struct {
             const start_row = size.rows - panel_rows;
             switch (self.panel) {
                 .find => {
-                    const cx = @min(8 + self.find_input.items.len, size.cols);
+                    const cx = @min(8 + strDisplayWidth(self.find_input.items), size.cols);
                     try w.print("\x1b[{d};{d}H\x1b[?25h", .{ start_row, cx });
                 },
                 .replace => {
                     if (self.panel_focus_replace) {
-                        const cx = @min(11 + self.replace_input.items.len, size.cols);
+                        const cx = @min(11 + strDisplayWidth(self.replace_input.items), size.cols);
                         try w.print("\x1b[{d};{d}H\x1b[?25h", .{ start_row + 1, cx });
                     } else {
-                        const cx = @min(11 + self.find_input.items.len, size.cols);
+                        const cx = @min(11 + strDisplayWidth(self.find_input.items), size.cols);
                         try w.print("\x1b[{d};{d}H\x1b[?25h", .{ start_row, cx });
                     }
                 },
                 .prompt_open => {
-                    const cx = @min(13 + self.prompt_input.items.len, size.cols);
+                    const cx = @min(13 + strDisplayWidth(self.prompt_input.items), size.cols);
                     try w.print("\x1b[{d};{d}H\x1b[?25h", .{ start_row, cx });
                 },
                 .prompt_save_as => {
-                    const cx = @min(11 + self.prompt_input.items.len, size.cols);
+                    const cx = @min(11 + strDisplayWidth(self.prompt_input.items), size.cols);
                     try w.print("\x1b[{d};{d}H\x1b[?25h", .{ start_row, cx });
                 },
                 .prompt_goto => {
-                    const cx = @min(20 + self.prompt_input.items.len, size.cols);
+                    const cx = @min(20 + strDisplayWidth(self.prompt_input.items), size.cols);
                     try w.print("\x1b[{d};{d}H\x1b[?25h", .{ start_row, cx });
                 },
                 .none => {},
@@ -2041,6 +2071,116 @@ pub const Editor = struct {
     }
 };
 
+// --- Unicode Display Width (East Asian Width / wcwidth) ---
+
+pub const DecodedChar = struct {
+    byte_len: usize,
+    width: usize,
+};
+
+pub fn decodeCharWidth(bytes: []const u8) DecodedChar {
+    if (bytes.len == 0) return .{ .byte_len = 0, .width = 0 };
+    const b0 = bytes[0];
+    if (b0 < 0x80) {
+        return .{ .byte_len = 1, .width = 1 };
+    }
+    const seq_len = std.unicode.utf8ByteSequenceLength(b0) catch {
+        return .{ .byte_len = 1, .width = 1 };
+    };
+    if (bytes.len < seq_len) {
+        return .{ .byte_len = 1, .width = 1 };
+    }
+    const cp = std.unicode.utf8Decode(bytes[0..seq_len]) catch {
+        return .{ .byte_len = 1, .width = 1 };
+    };
+    return .{ .byte_len = seq_len, .width = codepointWidth(cp) };
+}
+
+pub fn codepointWidth(cp: u21) usize {
+    if (cp == 0) return 0;
+    if (cp < 0x20 or (cp >= 0x7f and cp < 0xa0)) return 1; // rendered as '?'
+    // Zero-width combining marks, variation selectors, ZWJ/ZWNJ
+    if ((cp >= 0x0300 and cp <= 0x036F) or
+        (cp >= 0x1AB0 and cp <= 0x1AFF) or
+        (cp >= 0x1DC0 and cp <= 0x1DFF) or
+        (cp >= 0x200B and cp <= 0x200F) or
+        (cp >= 0x20D0 and cp <= 0x20FF) or
+        (cp >= 0xFE00 and cp <= 0xFE0F) or
+        (cp >= 0xFE20 and cp <= 0xFE2F) or
+        (cp >= 0xE0100 and cp <= 0xE01EF))
+    {
+        return 0;
+    }
+    // East Asian Wide (W) and Fullwidth (F) ranges + Emoji
+    if (cp >= 0x1100 and
+        ((cp <= 0x115F) or // Hangul Jamo
+        (cp == 0x2329 or cp == 0x232A) or
+        (cp >= 0x231A and cp <= 0x231B) or
+        (cp >= 0x23E9 and cp <= 0x23F3) or
+        (cp >= 0x25FD and cp <= 0x25FE) or
+        (cp >= 0x2614 and cp <= 0x2615) or
+        (cp >= 0x2648 and cp <= 0x2653) or
+        (cp == 0x267F or cp == 0x2693 or cp == 0x26A1) or
+        (cp >= 0x26AA and cp <= 0x26AB) or
+        (cp >= 0x26BD and cp <= 0x26BE) or
+        (cp >= 0x26C4 and cp <= 0x26C5) or
+        (cp == 0x26CE or cp == 0x26D4 or cp == 0x26EA) or
+        (cp >= 0x26F2 and cp <= 0x26F5) or
+        (cp == 0x26FA or cp == 0x26FD or cp == 0x2705) or
+        (cp >= 0x270A and cp <= 0x270B) or
+        (cp == 0x2728 or cp == 0x274C or cp == 0x274E) or
+        (cp >= 0x2753 and cp <= 0x2755) or
+        (cp == 0x2757) or
+        (cp >= 0x2795 and cp <= 0x2797) or
+        (cp == 0x27B0 or cp == 0x27BF) or
+        (cp >= 0x2B1B and cp <= 0x2B1C) or
+        (cp == 0x2B50 or cp == 0x2B55) or
+        (cp >= 0x2E80 and cp <= 0x303E) or // CJK Radicals, Kangxi, CJK Symbols & Punctuation (、。「」【】)
+        (cp >= 0x3040 and cp <= 0x33FF) or // Hiragana, Katakana, Bopomofo, Hangul Compat, Kanbun, CJK Squared
+        (cp >= 0x3400 and cp <= 0x4DBF) or // CJK Unified Ideographs Extension A
+        (cp >= 0x4E00 and cp <= 0xA4CF) or // CJK Unified Ideographs, Yi
+        (cp >= 0xA960 and cp <= 0xA97F) or // Hangul Jamo Extended-A
+        (cp >= 0xAC00 and cp <= 0xD7A3) or // Hangul Syllables
+        (cp >= 0xF900 and cp <= 0xFAFF) or // CJK Compatibility Ideographs
+        (cp >= 0xFE10 and cp <= 0xFE19) or // Vertical forms
+        (cp >= 0xFE30 and cp <= 0xFE6F) or // CJK Compatibility Forms
+        (cp >= 0xFF01 and cp <= 0xFF60) or // Fullwidth ASCII variants (！～)
+        (cp >= 0xFFE0 and cp <= 0xFFE6) or // Fullwidth symbols (￥ etc.)
+        (cp >= 0x1F1E6 and cp <= 0x1F1FF) or
+        (cp >= 0x1F300 and cp <= 0x1F64F) or // Misc Symbols, Pictographs, Emoticons
+        (cp >= 0x1F680 and cp <= 0x1F6FF) or // Transport & Map Symbols
+        (cp >= 0x1F900 and cp <= 0x1F9FF) or // Supplemental Symbols and Pictographs
+        (cp >= 0x1FA70 and cp <= 0x1FAFF) or
+        (cp >= 0x20000 and cp <= 0x3FFFD))) // CJK Unified Ideographs Extensions B..I
+    {
+        return 2;
+    }
+    return 1;
+}
+
+pub fn strDisplayWidth(s: []const u8) usize {
+    var cols: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        const dec = decodeCharWidth(s[i..]);
+        cols += dec.width;
+        i += dec.byte_len;
+    }
+    return cols;
+}
+
+pub fn sliceFittingColumns(s: []const u8, max_cols: usize) struct { bytes: usize, cols: usize } {
+    var cols: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        const dec = decodeCharWidth(s[i..]);
+        if (cols + dec.width > max_cols) break;
+        cols += dec.width;
+        i += dec.byte_len;
+    }
+    return .{ .bytes = i, .cols = cols };
+}
+
 fn writeSpaces(w: anytype, n: usize) !void {
     const spaces = "                                                                ";
     var rem = n;
@@ -2057,3 +2197,23 @@ fn countDigits(n: usize) usize {
     while (v >= 10) : (v /= 10) d += 1;
     return d;
 }
+
+test "Unicode display width and UTF-8 column truncation for Japanese CJK text" {
+    // Each Japanese character (Hiragana, Katakana, Kanji) occupies 2 terminal columns (3 UTF-8 bytes)
+    try std.testing.expectEqual(@as(usize, 12), strDisplayWidth("日本語テスト"));
+    try std.testing.expectEqual(@as(usize, 9), strDisplayWidth("あaいbうc"));
+    // Half-width katakana (FF61..FF9F) is 1 column
+    try std.testing.expectEqual(@as(usize, 3), strDisplayWidth("ｱｲｳ"));
+
+    // Truncating "日本語.zig" (10 cols) to 5 columns should fit "日本" (4 cols, 6 bytes) without splitting a codepoint
+    const fit1 = sliceFittingColumns("日本語.zig", 5);
+    try std.testing.expectEqual(@as(usize, 6), fit1.bytes);
+    try std.testing.expectEqual(@as(usize, 4), fit1.cols);
+    try std.testing.expectEqualStrings("日本", "日本語.zig"[0..fit1.bytes]);
+
+    // Truncating to 6 columns should fit "日本語" (6 cols, 9 bytes)
+    const fit2 = sliceFittingColumns("日本語.zig", 6);
+    try std.testing.expectEqual(@as(usize, 9), fit2.bytes);
+    try std.testing.expectEqual(@as(usize, 6), fit2.cols);
+}
+
