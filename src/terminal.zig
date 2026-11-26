@@ -212,8 +212,7 @@ pub const Terminal = struct {
             _ = win32.GetConsoleMode(in_h, &self.orig_in_mode);
             _ = win32.GetConsoleMode(out_h, &self.orig_out_mode);
 
-            const new_in: std.os.windows.DWORD = win32.ENABLE_VIRTUAL_TERMINAL_INPUT |
-                win32.ENABLE_WINDOW_INPUT |
+            const new_in: std.os.windows.DWORD = win32.ENABLE_WINDOW_INPUT |
                 win32.ENABLE_MOUSE_INPUT |
                 win32.ENABLE_EXTENDED_FLAGS;
             const new_out = self.orig_out_mode | win32.ENABLE_PROCESSED_OUTPUT |
@@ -373,15 +372,21 @@ pub const Terminal = struct {
                 } else if (rec.EventType == win32.KEY_EVENT) {
                     const kev = rec.Event.KeyEvent;
                     if (kev.bKeyDown != 0) {
-                        const ch = kev.uChar.UnicodeChar;
-                        if (ch != 0) {
-                            const repeat: usize = @max(@as(usize, kev.wRepeatCount), 1);
-                            var r: usize = 0;
-                            while (r < repeat) : (r += 1) {
-                                added += try self.appendWinUtf16Unit(ch);
+                        const repeat: usize = @max(@as(usize, kev.wRepeatCount), 1);
+                        var r: usize = 0;
+                        while (r < repeat) : (r += 1) {
+                            const vk_added = try self.appendWinVirtualKey(kev.wVirtualKeyCode, kev.dwControlKeyState);
+                            if (vk_added > 0) {
+                                added += vk_added;
+                            } else if (kev.uChar.UnicodeChar != 0) {
+                                const alt = (kev.dwControlKeyState & (win32.LEFT_ALT_PRESSED | win32.RIGHT_ALT_PRESSED)) != 0;
+                                const ctrl = (kev.dwControlKeyState & (win32.LEFT_CTRL_PRESSED | win32.RIGHT_CTRL_PRESSED)) != 0;
+                                if (alt and !ctrl and kev.uChar.UnicodeChar < 0x80) {
+                                    try self.in_buf.append(0x1b);
+                                    added += 1;
+                                }
+                                added += try self.appendWinUtf16Unit(kev.uChar.UnicodeChar);
                             }
-                        } else {
-                            added += try self.appendWinVirtualKey(kev.wVirtualKeyCode, kev.dwControlKeyState);
                         }
                     }
                 }
@@ -433,6 +438,10 @@ pub const Terminal = struct {
 
             var buf: [16]u8 = undefined;
             const seq: []const u8 = switch (vk) {
+                0x08 => if (ctrl) "\x1b[127;5u" else if (alt) "\x1b\x7f" else "\x7f", // VK_BACK
+                0x09 => if (ctrl and shift) "\x1b[27;6;9~" else if (ctrl) "\x1b[27;5;9~" else if (shift) "\x1b[Z" else "\t", // VK_TAB
+                0x0D => if (alt) "\x1b\r" else "\r", // VK_RETURN
+                0x1B => "\x1b", // VK_ESCAPE
                 0x26 => if (mod == 1) "\x1b[A" else std.fmt.bufPrint(&buf, "\x1b[1;{d}A", .{mod}) catch "", // VK_UP
                 0x28 => if (mod == 1) "\x1b[B" else std.fmt.bufPrint(&buf, "\x1b[1;{d}B", .{mod}) catch "", // VK_DOWN
                 0x27 => if (mod == 1) "\x1b[C" else std.fmt.bufPrint(&buf, "\x1b[1;{d}C", .{mod}) catch "", // VK_RIGHT
@@ -445,6 +454,8 @@ pub const Terminal = struct {
                 0x70 => "\x1bOP", // VK_F1
                 0x71 => "\x1bOQ", // VK_F2
                 0x72 => if (shift) "\x1b[1;2R" else "\x1bOR", // VK_F3
+                0x73 => "\x1bOS", // VK_F4
+                0x74 => "\x1b[15~", // VK_F5
                 else => "",
             };
             if (seq.len > 0) {

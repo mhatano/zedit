@@ -258,4 +258,20 @@ pub const Explorer = struct {
         self.show_hidden = !self.show_hidden;
         try self.refresh();
     }
+
+    pub const MIN_WIDTH: usize = 16;
+
+    pub fn setWidth(self: *Explorer, new_w: usize, term_cols: usize) void {
+        const max_w = if (term_cols > 24) @min(term_cols - 16, 80) else MIN_WIDTH;
+        self.width = std.math.clamp(new_w, MIN_WIDTH, @max(MIN_WIDTH, max_w));
+    }
+
+    pub fn resizeBy(self: *Explorer, delta: isize, term_cols: usize) void {
+        const cur: isize = @intCast(self.width);
+        const target: usize = if (cur + delta < @as(isize, @intCast(MIN_WIDTH)))
+            MIN_WIDTH
+        else
+            @intCast(cur + delta);
+        self.setWidth(target, term_cols);
+    }
 };

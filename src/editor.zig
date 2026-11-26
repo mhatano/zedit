@@ -78,6 +78,8 @@ pub const Editor = struct {
     last_editor_x: usize,
     last_editor_rows: usize,
     mouse_dragging: bool,
+    sidebar_resizing: bool,
+    sidebar_scrollbar_dragging: bool,
 
     // Reusable render buffers (zero heap churn per frame)
     frame_buf: std.ArrayList(u8),
@@ -126,6 +128,8 @@ pub const Editor = struct {
             .last_editor_x = 0,
             .last_editor_rows = 20,
             .mouse_dragging = false,
+            .sidebar_resizing = false,
+            .sidebar_scrollbar_dragging = false,
             .frame_buf = std.ArrayList(u8).init(allocator),
             .line_scratch = std.ArrayList(u8).init(allocator),
             .token_scratch = std.ArrayList(Syntax.TokenKind).init(allocator),
@@ -471,6 +475,18 @@ pub const Editor = struct {
                         self.openEncodingPanel();
                         return;
                     }
+                    if (ch == '[' or ch == '-' or ch == ',') {
+                        if (!self.explorer.visible) self.explorer.visible = true;
+                        self.explorer.resizeBy(-2, self.term.getSize().cols);
+                        self.setStatusFmt(false, "Explorer width: {d}", .{self.explorer.width});
+                        return;
+                    }
+                    if (ch == ']' or ch == '=' or ch == '+' or ch == '.') {
+                        if (!self.explorer.visible) self.explorer.visible = true;
+                        self.explorer.resizeBy(2, self.term.getSize().cols);
+                        self.setStatusFmt(false, "Explorer width: {d}", .{self.explorer.width});
+                        return;
+                    }
                 },
                 else => {},
             }
@@ -488,7 +504,7 @@ pub const Editor = struct {
             return;
         }
         if (k.code == .f1) {
-            self.setStatus("Keys: ^S Save │ ^O Open │ ^U/F2 Encoding │ ^F Find │ ^H Replace │ ^B/^E Tree │ Alt+←/→ Tabs │ ^Q Quit", false);
+            self.setStatus("Keys: ^S Save │ ^O Open │ ^U/F2 Enc │ ^F Find │ ^B/^E Tree ([/] Width) │ Alt+←/→ Tabs │ ^Q Quit", false);
             return;
         }
 
@@ -562,15 +578,41 @@ pub const Editor = struct {
 
     fn handleExplorerKey(self: *Editor, k: Term.KeyEvent) !void {
         const view_h = if (self.last_editor_rows > 1) self.last_editor_rows - 1 else 1;
+        const term_cols = self.term.getSize().cols;
         switch (k.code) {
             .escape, .tab => self.explorer.focused = false,
-            .up => self.explorer.moveUp(view_h),
-            .down => self.explorer.moveDown(view_h),
+            .up => {
+                if (k.ctrl) {
+                    self.explorer.scrollBy(-1, view_h);
+                } else {
+                    self.explorer.moveUp(view_h);
+                }
+            },
+            .down => {
+                if (k.ctrl) {
+                    self.explorer.scrollBy(1, view_h);
+                } else {
+                    self.explorer.moveDown(view_h);
+                }
+            },
             .page_up => self.explorer.pageUp(view_h),
             .page_down => self.explorer.pageDown(view_h),
             .home => self.explorer.moveHome(view_h),
             .end => self.explorer.moveEnd(view_h),
-            .enter, .right => {
+            .right => {
+                if (k.shift or k.ctrl) {
+                    self.explorer.resizeBy(2, term_cols);
+                    self.setStatusFmt(false, "Explorer width: {d}", .{self.explorer.width});
+                } else {
+                    if (try self.explorer.activateSelected()) |file_path| {
+                        const duped = try self.allocator.dupe(u8, file_path);
+                        defer self.allocator.free(duped);
+                        try self.openFile(duped);
+                    }
+                    self.explorer.ensureVisible(view_h);
+                }
+            },
+            .enter => {
                 if (try self.explorer.activateSelected()) |file_path| {
                     const duped = try self.allocator.dupe(u8, file_path);
                     defer self.allocator.free(duped);
@@ -578,7 +620,14 @@ pub const Editor = struct {
                 }
                 self.explorer.ensureVisible(view_h);
             },
-            .left => try self.explorer.collapseOrParent(view_h),
+            .left => {
+                if (k.shift or k.ctrl) {
+                    self.explorer.resizeBy(-2, term_cols);
+                    self.setStatusFmt(false, "Explorer width: {d}", .{self.explorer.width});
+                } else {
+                    try self.explorer.collapseOrParent(view_h);
+                }
+            },
             .char => |ch| {
                 if (ch == 'j') {
                     self.explorer.moveDown(view_h);
@@ -588,6 +637,12 @@ pub const Editor = struct {
                     self.explorer.moveHome(view_h);
                 } else if (ch == 'G') {
                     self.explorer.moveEnd(view_h);
+                } else if (ch == '[' or ch == '-' or ch == '<') {
+                    self.explorer.resizeBy(-2, term_cols);
+                    self.setStatusFmt(false, "Explorer width: {d}", .{self.explorer.width});
+                } else if (ch == ']' or ch == '=' or ch == '+' or ch == '>') {
+                    self.explorer.resizeBy(2, term_cols);
+                    self.setStatusFmt(false, "Explorer width: {d}", .{self.explorer.width});
                 } else if (ch == ' ') {
                     if (try self.explorer.activateSelected()) |file_path| {
                         const duped = try self.allocator.dupe(u8, file_path);
@@ -1399,9 +1454,10 @@ pub const Editor = struct {
         const buf = self.activeBuf();
 
         const view_h = if (self.last_editor_rows > 1) self.last_editor_rows - 1 else 1;
+        const show_sidebar = self.explorer.visible and size.cols >= 40;
 
         if (m.kind == .scroll_up) {
-            if (self.explorer.visible and m.x < self.explorer.width) {
+            if (show_sidebar and (m.x <= self.explorer.width or self.explorer.focused)) {
                 self.explorer.scrollBy(-3, view_h);
             } else {
                 buf.scroll_row -|= 3;
@@ -1409,7 +1465,7 @@ pub const Editor = struct {
             return;
         }
         if (m.kind == .scroll_down) {
-            if (self.explorer.visible and m.x < self.explorer.width) {
+            if (show_sidebar and (m.x <= self.explorer.width or self.explorer.focused)) {
                 self.explorer.scrollBy(3, view_h);
             } else {
                 const max_scroll = if (buf.lineCount() > 1) buf.lineCount() - 1 else 0;
@@ -1420,6 +1476,20 @@ pub const Editor = struct {
 
         if (m.kind == .release) {
             self.mouse_dragging = false;
+            self.sidebar_resizing = false;
+            self.sidebar_scrollbar_dragging = false;
+            return;
+        }
+
+        // Ongoing drag of sidebar border (resize width)
+        if (m.kind == .drag and self.sidebar_resizing) {
+            self.explorer.setWidth(@max(m.x, Explorer.MIN_WIDTH), size.cols);
+            return;
+        }
+
+        // Ongoing drag of sidebar scrollbar
+        if (m.kind == .drag and self.sidebar_scrollbar_dragging) {
+            self.scrollSidebarToMouseY(m.y, view_h);
             return;
         }
 
@@ -1444,20 +1514,41 @@ pub const Editor = struct {
             return;
         }
 
+        // Click on sidebar vertical separator border (m.x == self.explorer.width) -> start drag-resizing
+        if (m.kind == .press and show_sidebar and m.y >= 1 and m.y < 1 + self.last_editor_rows and m.x == self.explorer.width) {
+            self.sidebar_resizing = true;
+            return;
+        }
+
         // Click in sidebar
-        if (m.kind == .press and self.explorer.visible and size.cols >= 50 and m.x < self.explorer.width) {
+        if (m.kind == .press and show_sidebar and m.x < self.explorer.width) {
             self.explorer.focused = true;
             self.panel = .none;
             if (m.y == 1) {
-                // Click on EXPLORER header: focus sidebar and scroll buttons if clicked near right edge
-                if (m.x + 4 >= self.explorer.width) {
-                    self.explorer.pageDown(view_h);
-                } else if (m.x + 8 >= self.explorer.width) {
-                    self.explorer.pageUp(view_h);
+                // Header row: right-side buttons [ - + ▲ ▼ ]
+                if (self.explorer.width >= 16) {
+                    const right_offset = self.explorer.width - 1 - m.x;
+                    if (right_offset <= 1) {
+                        self.explorer.pageDown(view_h);
+                    } else if (right_offset <= 3) {
+                        self.explorer.pageUp(view_h);
+                    } else if (right_offset <= 5) {
+                        self.explorer.resizeBy(2, size.cols);
+                        self.setStatusFmt(false, "Explorer width: {d}", .{self.explorer.width});
+                    } else if (right_offset <= 7) {
+                        self.explorer.resizeBy(-2, size.cols);
+                        self.setStatusFmt(false, "Explorer width: {d}", .{self.explorer.width});
+                    }
                 }
                 return;
             }
             if (m.y >= 2 and m.y < 1 + self.last_editor_rows) {
+                // Check if click is on the rightmost scrollbar column
+                if (m.x + 1 == self.explorer.width and self.explorer.entries.items.len > view_h) {
+                    self.sidebar_scrollbar_dragging = true;
+                    self.scrollSidebarToMouseY(m.y, view_h);
+                    return;
+                }
                 const idx = self.explorer.scroll + (m.y - 2);
                 if (idx < self.explorer.entries.items.len) {
                     self.explorer.selected = idx;
@@ -1497,6 +1588,24 @@ pub const Editor = struct {
                 buf.cursor = new_offset;
             }
             buf.preferred_col = null;
+        }
+    }
+
+    fn scrollSidebarToMouseY(self: *Editor, mouse_y: usize, view_h: usize) void {
+        const total = self.explorer.entries.items.len;
+        if (total <= view_h or view_h == 0) return;
+        const track_y = if (mouse_y >= 2) @min(mouse_y - 2, view_h - 1) else 0;
+        const max_scroll = total - view_h;
+        const new_scroll = if (view_h > 1)
+            (track_y * max_scroll) / (view_h - 1)
+        else
+            0;
+        self.explorer.scroll = @min(new_scroll, max_scroll);
+        // Keep selection inside the newly scrolled viewport so subsequent Up/Down keys continue from here
+        if (self.explorer.selected < self.explorer.scroll) {
+            self.explorer.selected = self.explorer.scroll;
+        } else if (self.explorer.selected >= self.explorer.scroll + view_h) {
+            self.explorer.selected = self.explorer.scroll + view_h - 1;
         }
     }
 
@@ -1545,7 +1654,7 @@ pub const Editor = struct {
         const size = self.term.getSize();
         const panel_rows = self.panelRows();
         const ed_rows = if (size.rows > 2 + panel_rows) size.rows - 2 - panel_rows else 1;
-        const sidebar_w: usize = if (self.explorer.visible and size.cols >= 50) self.explorer.width + 1 else 0;
+        const sidebar_w: usize = if (self.explorer.visible and size.cols >= 40) self.explorer.width + 1 else 0;
         const ed_cols = if (size.cols > sidebar_w + self.last_gutter_w) size.cols - sidebar_w - self.last_gutter_w else 1;
 
         const buf = self.activeBuf();
@@ -1645,7 +1754,10 @@ pub const Editor = struct {
 
         const panel_rows = self.panelRows();
         const ed_rows = if (size.rows > 2 + panel_rows) size.rows - 2 - panel_rows else 1;
-        const show_sidebar = self.explorer.visible and size.cols >= 50;
+        const show_sidebar = self.explorer.visible and size.cols >= 40;
+        if (show_sidebar) {
+            self.explorer.setWidth(self.explorer.width, size.cols);
+        }
         const sidebar_w: usize = if (show_sidebar) self.explorer.width else 0;
         const ed_x: usize = if (show_sidebar) sidebar_w + 1 else 0;
         const ed_total_w = size.cols - ed_x;
@@ -1694,7 +1806,11 @@ pub const Editor = struct {
             if (show_sidebar) {
                 try self.renderSidebarRow(w, screen_row, sidebar_w, if (ed_rows > 1) ed_rows - 1 else 1);
                 // Explicitly position vertical separator at sidebar_w + 1 so wide characters never shift the border
-                try w.print("\x1b[{d};{d}H\x1b[48;2;24;24;37m\x1b[38;2;69;71;90m│", .{ screen_row + 2, sidebar_w + 1 });
+                if (self.sidebar_resizing) {
+                    try w.print("\x1b[{d};{d}H\x1b[48;2;24;24;37m\x1b[38;2;137;180;250m┃", .{ screen_row + 2, sidebar_w + 1 });
+                } else {
+                    try w.print("\x1b[{d};{d}H\x1b[48;2;24;24;37m\x1b[38;2;69;71;90m│", .{ screen_row + 2, sidebar_w + 1 });
+                }
             }
 
             const doc_line = buf.scroll_row + screen_row;
@@ -1782,7 +1898,7 @@ pub const Editor = struct {
 
     fn renderSidebarRow(self: *Editor, w: anytype, row: usize, width: usize, view_h: usize) !void {
         if (row == 0) {
-            // Explorer header with scroll indicator
+            // Explorer header with resize & scroll controls: " EXPLORER (1/25) - + ▲ ▼"
             if (self.explorer.focused) {
                 try w.writeAll("\x1b[48;2;49;50;68m\x1b[1m\x1b[38;2;137;180;250m");
             } else {
@@ -1790,64 +1906,104 @@ pub const Editor = struct {
             }
             var hdr_buf: [64]u8 = undefined;
             const total = self.explorer.entries.items.len;
-            const title = if (total > view_h)
-                std.fmt.bufPrint(&hdr_buf, " EXPLORER ({d}/{d}) ▲▼", .{ self.explorer.selected + 1, total }) catch " EXPLORER"
+            const left_title = if (total > 0)
+                std.fmt.bufPrint(&hdr_buf, " TREE {d}/{d}", .{ self.explorer.selected + 1, total }) catch " TREE"
             else if (self.explorer.show_hidden)
-                " EXPLORER [all]"
+                " TREE [all]"
             else
-                " EXPLORER";
-            const fit = sliceFittingColumns(title, width);
-            try w.writeAll(title[0..fit.bytes]);
-            try writeSpaces(w, width - fit.cols);
+                " TREE";
+            const right_btns = "- + ▲ ▼";
+            const right_w: usize = 7;
+
+            if (width >= right_w + 6) {
+                const max_left = width - right_w - 1;
+                const fit = sliceFittingColumns(left_title, max_left);
+                try w.writeAll(left_title[0..fit.bytes]);
+                try writeSpaces(w, width - right_w - fit.cols);
+                try w.writeAll("\x1b[38;2;186;194;222m");
+                try w.writeAll(right_btns);
+            } else {
+                const fit = sliceFittingColumns(left_title, width);
+                try w.writeAll(left_title[0..fit.bytes]);
+                try writeSpaces(w, width - fit.cols);
+            }
             try w.writeAll("\x1b[0m");
             return;
         }
 
-        const idx = self.explorer.scroll + (row - 1);
-        if (idx >= self.explorer.entries.items.len) {
+        const total = self.explorer.entries.items.len;
+        const item_row = row - 1;
+        const idx = self.explorer.scroll + item_row;
+        const content_w = if (width > 1) width - 1 else width;
+
+        if (idx >= total) {
             try w.writeAll("\x1b[48;2;24;24;37m");
-            try writeSpaces(w, width);
-            return;
-        }
-
-        const entry = self.explorer.entries.items[idx];
-        const is_sel = (idx == self.explorer.selected);
-        if (is_sel and self.explorer.focused) {
-            try w.writeAll("\x1b[48;2;69;71;90m\x1b[38;2;205;214;244m");
-        } else if (is_sel) {
-            try w.writeAll("\x1b[48;2;40;42;58m\x1b[38;2;205;214;244m");
+            try writeSpaces(w, content_w);
         } else {
-            try w.writeAll("\x1b[48;2;24;24;37m");
-        }
-
-        var used: usize = 0;
-        const indent = @min(entry.depth * 2 + 1, if (width > 4) width - 4 else 0);
-        try writeSpaces(w, indent);
-        used += indent;
-
-        if (entry.is_dir) {
-            try w.writeAll("\x1b[38;2;137;180;250m");
-            if (used + 2 <= width) {
-                try w.writeAll(if (entry.is_expanded) "▾ " else "▸ ");
-                used += 2;
+            const entry = self.explorer.entries.items[idx];
+            const is_sel = (idx == self.explorer.selected);
+            if (is_sel and self.explorer.focused) {
+                try w.writeAll("\x1b[48;2;69;71;90m\x1b[38;2;205;214;244m");
+            } else if (is_sel) {
+                try w.writeAll("\x1b[48;2;40;42;58m\x1b[38;2;205;214;244m");
+            } else {
+                try w.writeAll("\x1b[48;2;24;24;37m");
             }
-        } else {
-            try w.writeAll("\x1b[38;2;186;194;222m");
-            if (used + 2 <= width) {
-                try w.writeAll("  ");
-                used += 2;
+
+            var used: usize = 0;
+            const indent = @min(entry.depth * 2 + 1, if (content_w > 4) content_w - 4 else 0);
+            try writeSpaces(w, indent);
+            used += indent;
+
+            if (entry.is_dir) {
+                try w.writeAll("\x1b[38;2;137;180;250m");
+                if (used + 2 <= content_w) {
+                    try w.writeAll(if (entry.is_expanded) "▾ " else "▸ ");
+                    used += 2;
+                }
+            } else {
+                try w.writeAll("\x1b[38;2;186;194;222m");
+                if (used + 2 <= content_w) {
+                    try w.writeAll("  ");
+                    used += 2;
+                }
             }
+
+            const avail = if (entry.is_dir and content_w > used + 1) content_w - used - 1 else content_w - used;
+            const fit = sliceFittingColumns(entry.name, avail);
+            try w.writeAll(entry.name[0..fit.bytes]);
+            used += fit.cols;
+            if (entry.is_dir and used < content_w) {
+                try w.writeByte('/');
+                used += 1;
+            }
+            if (used < content_w) try writeSpaces(w, content_w - used);
         }
 
-        const avail = if (entry.is_dir and width > used + 1) width - used - 1 else width - used;
-        const fit = sliceFittingColumns(entry.name, avail);
-        try w.writeAll(entry.name[0..fit.bytes]);
-        used += fit.cols;
-        if (entry.is_dir and used < width) {
-            try w.writeByte('/');
-            used += 1;
+        // Render dedicated vertical scrollbar in the rightmost column of the sidebar (width - 1)
+        if (width > 1) {
+            if (total > view_h and view_h > 0) {
+                const thumb_h = @max((view_h * view_h) / total, 1);
+                const max_scroll = total - view_h;
+                const max_thumb_top = view_h - thumb_h;
+                const thumb_top = if (max_scroll > 0)
+                    (@min(self.explorer.scroll, max_scroll) * max_thumb_top) / max_scroll
+                else
+                    0;
+                const is_thumb = (item_row >= thumb_top and item_row < thumb_top + thumb_h);
+                if (is_thumb) {
+                    if (self.explorer.focused or self.sidebar_scrollbar_dragging) {
+                        try w.writeAll("\x1b[48;2;24;24;37m\x1b[38;2;137;180;250m█");
+                    } else {
+                        try w.writeAll("\x1b[48;2;24;24;37m\x1b[38;2;108;112;134m█");
+                    }
+                } else {
+                    try w.writeAll("\x1b[48;2;24;24;37m\x1b[38;2;49;50;68m░");
+                }
+            } else {
+                try w.writeAll("\x1b[48;2;24;24;37m ");
+            }
         }
-        if (used < width) try writeSpaces(w, width - used);
         try w.writeAll("\x1b[0m");
     }
 
