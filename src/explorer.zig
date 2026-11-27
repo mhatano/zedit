@@ -4,6 +4,7 @@ pub const Entry = struct {
     name: []u8,
     path: []u8, // path relative to cwd or root_path suitable for opening
     is_dir: bool,
+    is_parent: bool = false,
     depth: usize,
     is_expanded: bool,
 };
@@ -21,9 +22,11 @@ pub const Explorer = struct {
     show_hidden: bool,
 
     pub fn init(allocator: std.mem.Allocator, root_path: []const u8) !Explorer {
+        const real_root = std.fs.cwd().realpathAlloc(allocator, root_path) catch
+            try allocator.dupe(u8, root_path);
         var exp = Explorer{
             .allocator = allocator,
-            .root_path = try allocator.dupe(u8, root_path),
+            .root_path = real_root,
             .entries = std.ArrayList(Entry).init(allocator),
             .expanded = std.StringHashMap(void).init(allocator),
             .selected = 0,
@@ -40,12 +43,17 @@ pub const Explorer = struct {
     pub fn deinit(self: *Explorer) void {
         self.clearEntries();
         self.entries.deinit();
+        self.clearExpanded();
+        self.expanded.deinit();
+        self.allocator.free(self.root_path);
+    }
+
+    fn clearExpanded(self: *Explorer) void {
         var it = self.expanded.keyIterator();
         while (it.next()) |k| {
             self.allocator.free(k.*);
         }
-        self.expanded.deinit();
-        self.allocator.free(self.root_path);
+        self.expanded.clearRetainingCapacity();
     }
 
     fn clearEntries(self: *Explorer) void {
@@ -56,8 +64,85 @@ pub const Explorer = struct {
         self.entries.clearRetainingCapacity();
     }
 
+    pub fn rootDisplayName(self: *const Explorer) []const u8 {
+        const base = std.fs.path.basename(self.root_path);
+        if (base.len > 0) return base;
+        return self.root_path;
+    }
+
+    /// Changes the explorer root directory to `new_dir_path` (resolving relative to current `root_path` or `cwd`).
+    pub fn changeRoot(self: *Explorer, new_dir_path: []const u8) !void {
+        const candidate = if (std.fs.path.isAbsolute(new_dir_path))
+            try self.allocator.dupe(u8, new_dir_path)
+        else
+            try std.fs.path.join(self.allocator, &.{ self.root_path, new_dir_path });
+        defer self.allocator.free(candidate);
+
+        // Verify directory can be opened and resolve canonical path
+        const resolved = std.fs.cwd().realpathAlloc(self.allocator, candidate) catch blk: {
+            // Also try relative to process cwd directly
+            break :blk try std.fs.cwd().realpathAlloc(self.allocator, new_dir_path);
+        };
+        errdefer self.allocator.free(resolved);
+
+        var dir = try std.fs.cwd().openDir(resolved, .{});
+        dir.close();
+
+        self.allocator.free(self.root_path);
+        self.root_path = resolved;
+        self.clearExpanded();
+        self.selected = 0;
+        self.scroll = 0;
+        try self.refresh();
+    }
+
+    /// Navigates up to the parent directory of `root_path`.
+    pub fn goParent(self: *Explorer) !bool {
+        if (std.fs.path.dirname(self.root_path)) |parent| {
+            if (!std.mem.eql(u8, parent, self.root_path)) {
+                const parent_copy = try self.allocator.dupe(u8, parent);
+                defer self.allocator.free(parent_copy);
+                try self.changeRoot(parent_copy);
+                return true;
+            }
+        }
+        // Fallback: join ".."
+        const up = try std.fs.path.join(self.allocator, &.{ self.root_path, ".." });
+        defer self.allocator.free(up);
+        const resolved = std.fs.cwd().realpathAlloc(self.allocator, up) catch return false;
+        defer self.allocator.free(resolved);
+        if (std.mem.eql(u8, resolved, self.root_path)) return false;
+        try self.changeRoot(resolved);
+        return true;
+    }
+
+    /// Changes root directory into the currently selected directory entry (or parent if `..` is selected).
+    pub fn enterSelectedDir(self: *Explorer) !bool {
+        if (self.entries.items.len == 0) return false;
+        const entry = self.entries.items[self.selected];
+        if (entry.is_parent) {
+            return try self.goParent();
+        }
+        if (entry.is_dir) {
+            const target = try self.allocator.dupe(u8, entry.path);
+            defer self.allocator.free(target);
+            try self.changeRoot(target);
+            return true;
+        }
+        return false;
+    }
+
     pub fn refresh(self: *Explorer) !void {
         self.clearEntries();
+        // Always prepend ".." entry at top so user can navigate to parent directory via mouse or Enter
+        try self.entries.append(.{
+            .name = try self.allocator.dupe(u8, ".. (parent dir)"),
+            .path = try self.allocator.dupe(u8, ".."),
+            .is_dir = true,
+            .is_parent = true,
+            .depth = 0,
+            .is_expanded = false,
+        });
         try self.scanDir(self.root_path, 0);
         if (self.entries.items.len == 0) {
             self.selected = 0;
@@ -126,6 +211,7 @@ pub const Explorer = struct {
                 .name = name_copy,
                 .path = full_path,
                 .is_dir = it.is_dir,
+                .is_parent = false,
                 .depth = depth,
                 .is_expanded = is_expanded,
             });
@@ -213,10 +299,14 @@ pub const Explorer = struct {
         self.clampScroll(view_height);
     }
 
-    /// Toggles directory expansion or returns the file path to open.
+    /// Toggles directory expansion (or navigates to parent if `..` is selected) or returns the file path to open.
     pub fn activateSelected(self: *Explorer) !?[]const u8 {
         if (self.entries.items.len == 0) return null;
         const entry = self.entries.items[self.selected];
+        if (entry.is_parent) {
+            _ = try self.goParent();
+            return null;
+        }
         if (entry.is_dir) {
             if (self.expanded.fetchRemove(entry.path)) |kv| {
                 self.allocator.free(kv.key);
@@ -233,6 +323,10 @@ pub const Explorer = struct {
     pub fn collapseOrParent(self: *Explorer, view_height: usize) !void {
         if (self.entries.items.len == 0) return;
         const entry = self.entries.items[self.selected];
+        if (entry.is_parent) {
+            _ = try self.goParent();
+            return;
+        }
         if (entry.is_dir and entry.is_expanded) {
             if (self.expanded.fetchRemove(entry.path)) |kv| {
                 self.allocator.free(kv.key);
@@ -245,7 +339,7 @@ pub const Explorer = struct {
             var i = self.selected;
             while (i > 0) {
                 i -= 1;
-                if (self.entries.items[i].depth < entry.depth) {
+                if (!self.entries.items[i].is_parent and self.entries.items[i].depth < entry.depth) {
                     self.selected = i;
                     self.ensureVisible(view_height);
                     return;

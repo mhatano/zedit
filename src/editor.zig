@@ -24,6 +24,7 @@ pub const PanelMode = enum {
     prompt_save_as,
     prompt_goto,
     prompt_encoding,
+    prompt_chdir,
 };
 
 const TabHit = struct {
@@ -475,6 +476,16 @@ pub const Editor = struct {
                         self.openEncodingPanel();
                         return;
                     }
+                    if (lo == 'd') {
+                        try self.openChdirPrompt();
+                        return;
+                    }
+                    if (lo == 'f') {
+                        const font_name = self.term.cycleFontPreset();
+                        self.clear_screen_on_render = true;
+                        self.setStatusFmt(false, "Font: {s} (Alt+F: switch font)", .{font_name});
+                        return;
+                    }
                     if (ch == '[' or ch == '-' or ch == ',') {
                         if (!self.explorer.visible) self.explorer.visible = true;
                         self.explorer.resizeBy(-2, self.term.getSize().cols);
@@ -492,9 +503,15 @@ pub const Editor = struct {
             }
         }
 
-        // F1 / F2 / F3 global function keys
+        // F1 / F2 / F3 / F4 global function keys
         if (k.code == .f2) {
             self.openEncodingPanel();
+            return;
+        }
+        if (k.code == .f4) {
+            const font_name = self.term.cycleFontPreset();
+            self.clear_screen_on_render = true;
+            self.setStatusFmt(false, "Font: {s} (F4/Alt+F: switch font)", .{font_name});
             return;
         }
         if (k.code == .f3) {
@@ -504,7 +521,7 @@ pub const Editor = struct {
             return;
         }
         if (k.code == .f1) {
-            self.setStatus("Keys: ^S Save │ ^O Open │ ^U/F2 Enc │ ^F Find │ ^B/^E Tree ([/] Width) │ Alt+←/→ Tabs │ ^Q Quit", false);
+            self.setStatus("Keys: ^S Save | ^O Open | ^U/F2 Enc | F4/Alt+F Font | ^F Find | ^B/^E Tree (c/Alt+D Dir) | ^Q Quit", false);
             return;
         }
 
@@ -518,6 +535,14 @@ pub const Editor = struct {
             return;
         }
         try self.handleEditorKey(k);
+    }
+
+    pub fn openChdirPrompt(self: *Editor) !void {
+        self.explorer.visible = true;
+        self.explorer.focused = false;
+        self.panel = .prompt_chdir;
+        self.prompt_input.clearRetainingCapacity();
+        try self.prompt_input.appendSlice(self.explorer.root_path);
     }
 
     pub fn openEncodingPanel(self: *Editor) void {
@@ -599,6 +624,11 @@ pub const Editor = struct {
             .page_down => self.explorer.pageDown(view_h),
             .home => self.explorer.moveHome(view_h),
             .end => self.explorer.moveEnd(view_h),
+            .backspace => {
+                if (try self.explorer.goParent()) {
+                    self.setStatusFmt(false, "Tree directory: {s}", .{self.explorer.root_path});
+                }
+            },
             .right => {
                 if (k.shift or k.ctrl) {
                     self.explorer.resizeBy(2, term_cols);
@@ -613,10 +643,20 @@ pub const Editor = struct {
                 }
             },
             .enter => {
+                if (k.shift or k.alt) {
+                    // Shift+Enter or Alt+Enter enters selected directory as new root
+                    if (try self.explorer.enterSelectedDir()) {
+                        self.setStatusFmt(false, "Tree directory: {s}", .{self.explorer.root_path});
+                        return;
+                    }
+                }
+                const was_parent = (self.explorer.entries.items.len > 0 and self.explorer.entries.items[self.explorer.selected].is_parent);
                 if (try self.explorer.activateSelected()) |file_path| {
                     const duped = try self.allocator.dupe(u8, file_path);
                     defer self.allocator.free(duped);
                     try self.openFile(duped);
+                } else if (was_parent) {
+                    self.setStatusFmt(false, "Tree directory: {s}", .{self.explorer.root_path});
                 }
                 self.explorer.ensureVisible(view_h);
             },
@@ -637,6 +677,21 @@ pub const Editor = struct {
                     self.explorer.moveHome(view_h);
                 } else if (ch == 'G') {
                     self.explorer.moveEnd(view_h);
+                } else if (ch == 'u') {
+                    if (try self.explorer.goParent()) {
+                        self.setStatusFmt(false, "Tree directory: {s}", .{self.explorer.root_path});
+                    }
+                } else if (ch == 'c' or ch == '/') {
+                    // If on a directory, 'c' enters it as new root; if on a file (or 'C'/'/'), prompts for directory path
+                    if (ch == 'c' and self.explorer.entries.items.len > 0 and self.explorer.entries.items[self.explorer.selected].is_dir) {
+                        if (try self.explorer.enterSelectedDir()) {
+                            self.setStatusFmt(false, "Tree directory: {s}", .{self.explorer.root_path});
+                        }
+                    } else {
+                        try self.openChdirPrompt();
+                    }
+                } else if (ch == 'C' or ch == 'd') {
+                    try self.openChdirPrompt();
                 } else if (ch == '[' or ch == '-' or ch == '<') {
                     self.explorer.resizeBy(-2, term_cols);
                     self.setStatusFmt(false, "Explorer width: {d}", .{self.explorer.width});
@@ -720,7 +775,7 @@ pub const Editor = struct {
                     try self.runSearch(true);
                 }
             },
-            .prompt_open, .prompt_save_as, .prompt_goto => {
+            .prompt_open, .prompt_save_as, .prompt_goto, .prompt_chdir => {
                 if (k.code == .enter) {
                     const text = std.mem.trim(u8, self.prompt_input.items, " \t");
                     const mode = self.panel;
@@ -730,7 +785,25 @@ pub const Editor = struct {
                     defer self.allocator.free(duped);
 
                     switch (mode) {
-                        .prompt_open => try self.openFile(duped),
+                        .prompt_open => {
+                            // If user entered a directory path in Ctrl+O, switch explorer root directory!
+                            if (self.explorer.changeRoot(duped)) |_| {
+                                self.explorer.visible = true;
+                                self.explorer.focused = true;
+                                self.setStatusFmt(false, "Tree directory: {s}", .{self.explorer.root_path});
+                            } else |_| {
+                                try self.openFile(duped);
+                            }
+                        },
+                        .prompt_chdir => {
+                            self.explorer.changeRoot(duped) catch |err| {
+                                self.setStatusFmt(true, "Cannot open directory '{s}': {s}", .{ duped, @errorName(err) });
+                                return;
+                            };
+                            self.explorer.visible = true;
+                            self.explorer.focused = true;
+                            self.setStatusFmt(false, "Tree directory: {s}", .{self.explorer.root_path});
+                        },
                         .prompt_save_as => {
                             try self.activeBuf().setPath(duped);
                             try self.saveActive();
@@ -1194,7 +1267,7 @@ pub const Editor = struct {
             const target = switch (self.panel) {
                 .find => &self.find_input,
                 .replace => if (self.panel_focus_replace) &self.replace_input else &self.find_input,
-                .prompt_open, .prompt_save_as, .prompt_goto => &self.prompt_input,
+                .prompt_open, .prompt_save_as, .prompt_goto, .prompt_chdir => &self.prompt_input,
                 .prompt_encoding, .none => return,
             };
             try target.appendSlice(raw[0..nl]);
@@ -1525,21 +1598,27 @@ pub const Editor = struct {
             self.explorer.focused = true;
             self.panel = .none;
             if (m.y == 1) {
-                // Header row: right-side buttons [ - + ▲ ▼ ]
+                // Header row: right-side buttons [ - + ▲ ▼ ], left-side title opens Change Directory prompt
                 if (self.explorer.width >= 16) {
                     const right_offset = self.explorer.width - 1 - m.x;
                     if (right_offset <= 1) {
                         self.explorer.pageDown(view_h);
+                        return;
                     } else if (right_offset <= 3) {
                         self.explorer.pageUp(view_h);
+                        return;
                     } else if (right_offset <= 5) {
                         self.explorer.resizeBy(2, size.cols);
                         self.setStatusFmt(false, "Explorer width: {d}", .{self.explorer.width});
+                        return;
                     } else if (right_offset <= 7) {
                         self.explorer.resizeBy(-2, size.cols);
                         self.setStatusFmt(false, "Explorer width: {d}", .{self.explorer.width});
+                        return;
                     }
                 }
+                // Clicked on header title / directory name -> open change directory prompt!
+                try self.openChdirPrompt();
                 return;
             }
             if (m.y >= 2 and m.y < 1 + self.last_editor_rows) {
@@ -1552,10 +1631,13 @@ pub const Editor = struct {
                 const idx = self.explorer.scroll + (m.y - 2);
                 if (idx < self.explorer.entries.items.len) {
                     self.explorer.selected = idx;
+                    const was_parent = self.explorer.entries.items[idx].is_parent;
                     if (try self.explorer.activateSelected()) |path| {
                         const duped = try self.allocator.dupe(u8, path);
                         defer self.allocator.free(duped);
                         try self.openFile(duped);
+                    } else if (was_parent) {
+                        self.setStatusFmt(false, "Tree directory: {s}", .{self.explorer.root_path});
                     }
                     self.explorer.ensureVisible(view_h);
                 }
@@ -1677,7 +1759,7 @@ pub const Editor = struct {
     fn panelRows(self: *const Editor) usize {
         return switch (self.panel) {
             .none => 0,
-            .find, .prompt_open, .prompt_save_as, .prompt_goto, .prompt_encoding => 1,
+            .find, .prompt_open, .prompt_save_as, .prompt_goto, .prompt_encoding, .prompt_chdir => 1,
             .replace => 2,
         };
     }
@@ -1807,15 +1889,15 @@ pub const Editor = struct {
                 try self.renderSidebarRow(w, screen_row, sidebar_w, if (ed_rows > 1) ed_rows - 1 else 1);
                 // Explicitly position vertical separator at sidebar_w + 1 so wide characters never shift the border
                 if (self.sidebar_resizing) {
-                    try w.print("\x1b[{d};{d}H\x1b[48;2;24;24;37m\x1b[38;2;137;180;250m┃", .{ screen_row + 2, sidebar_w + 1 });
+                    try w.print("\x1b[{d};{d}H\x1b[48;2;24;24;37m\x1b[38;2;137;180;250m|", .{ screen_row + 2, sidebar_w + 1 });
                 } else {
-                    try w.print("\x1b[{d};{d}H\x1b[48;2;24;24;37m\x1b[38;2;69;71;90m│", .{ screen_row + 2, sidebar_w + 1 });
+                    try w.print("\x1b[{d};{d}H\x1b[48;2;24;24;37m\x1b[38;2;69;71;90m|", .{ screen_row + 2, sidebar_w + 1 });
                 }
             }
 
             const doc_line = buf.scroll_row + screen_row;
             if (doc_line < line_count) {
-                try self.renderCodeRow(w, buf, doc_line, cursor_lc.line, lang, gutter_w, code_w, sel, bracket_match);
+                try self.renderCodeRow(w, buf, doc_line, cursor_lc.line, lang, ed_x, gutter_w, code_w, sel, bracket_match);
             } else {
                 // Empty tilde row beyond EOF
                 try w.writeAll("\x1b[48;2;30;30;46m\x1b[38;2;69;71;90m");
@@ -1847,11 +1929,11 @@ pub const Editor = struct {
         self.tab_hits.clearRetainingCapacity();
         try w.writeAll("\x1b[1;1H\x1b[48;2;17;17;27m\x1b[38;2;166;173;200m");
 
-        // Explorer toggle badge
+        // Explorer toggle badge (strict ASCII so East Asian Ambiguous width in CJK fonts never shifts columns)
         if (self.explorer.visible) {
-            try w.writeAll("\x1b[38;2;137;180;250m ≡ \x1b[38;2;69;71;90m│");
+            try w.writeAll("\x1b[38;2;137;180;250m = \x1b[38;2;69;71;90m|");
         } else {
-            try w.writeAll("\x1b[38;2;108;112;134m ≡ \x1b[38;2;69;71;90m│");
+            try w.writeAll("\x1b[38;2;108;112;134m = \x1b[38;2;69;71;90m|");
         }
         var col: usize = 4;
 
@@ -1861,22 +1943,25 @@ pub const Editor = struct {
             const mod = b.isModified();
             const name_w = strDisplayWidth(name);
 
-            // Format: " name ● × " or " name × "
+            // Format: " name * x " or " name x "
             const tab_len = 1 + name_w + (if (mod) @as(usize, 2) else 0) + 3;
             if (col + tab_len > cols) break;
 
             const x_start = col;
+            try w.print("\x1b[{d}G", .{x_start + 1});
             if (is_active) {
                 try w.writeAll("\x1b[48;2;30;30;46m\x1b[1m\x1b[38;2;205;214;244m ");
             } else {
                 try w.writeAll("\x1b[48;2;24;24;37m\x1b[0m\x1b[48;2;24;24;37m\x1b[38;2;147;153;178m ");
             }
             try w.writeAll(name);
+            const after_name_col = x_start + 1 + name_w;
+            try w.print("\x1b[{d}G", .{after_name_col + 1});
             if (mod) {
-                try w.writeAll(" \x1b[38;2;249;226;175m●");
+                try w.writeAll(" \x1b[38;2;249;226;175m*");
             }
             const close_x = x_start + tab_len - 2;
-            try w.writeAll(" \x1b[38;2;108;112;134m× \x1b[0m\x1b[48;2;17;17;27m");
+            try w.writeAll(" \x1b[38;2;108;112;134mx \x1b[0m\x1b[48;2;17;17;27m");
 
             try self.tab_hits.append(.{
                 .buf_idx = idx,
@@ -1887,7 +1972,7 @@ pub const Editor = struct {
             col += tab_len;
 
             if (col < cols) {
-                try w.writeAll("\x1b[38;2;49;50;68m│");
+                try w.print("\x1b[{d}G\x1b[38;2;49;50;68m|", .{col + 1});
                 col += 1;
             }
         }
@@ -1898,21 +1983,16 @@ pub const Editor = struct {
 
     fn renderSidebarRow(self: *Editor, w: anytype, row: usize, width: usize, view_h: usize) !void {
         if (row == 0) {
-            // Explorer header with resize & scroll controls: " EXPLORER (1/25) - + ▲ ▼"
+            // Explorer header showing current root directory name & resize/scroll controls
             if (self.explorer.focused) {
                 try w.writeAll("\x1b[48;2;49;50;68m\x1b[1m\x1b[38;2;137;180;250m");
             } else {
                 try w.writeAll("\x1b[48;2;24;24;37m\x1b[1m\x1b[38;2;147;153;178m");
             }
-            var hdr_buf: [64]u8 = undefined;
-            const total = self.explorer.entries.items.len;
-            const left_title = if (total > 0)
-                std.fmt.bufPrint(&hdr_buf, " TREE {d}/{d}", .{ self.explorer.selected + 1, total }) catch " TREE"
-            else if (self.explorer.show_hidden)
-                " TREE [all]"
-            else
-                " TREE";
-            const right_btns = "- + ▲ ▼";
+            var hdr_buf: [128]u8 = undefined;
+            const root_name = self.explorer.rootDisplayName();
+            const left_title = std.fmt.bufPrint(&hdr_buf, " [{s}]", .{root_name}) catch " TREE";
+            const right_btns = "- + ^ v";
             const right_w: usize = 7;
 
             if (width >= right_w + 6) {
@@ -1920,8 +2000,7 @@ pub const Editor = struct {
                 const fit = sliceFittingColumns(left_title, max_left);
                 try w.writeAll(left_title[0..fit.bytes]);
                 try writeSpaces(w, width - right_w - fit.cols);
-                try w.writeAll("\x1b[38;2;186;194;222m");
-                try w.writeAll(right_btns);
+                try w.print("\x1b[{d}G\x1b[38;2;186;194;222m{s}", .{ width - right_w + 1, right_btns });
             } else {
                 const fit = sliceFittingColumns(left_title, width);
                 try w.writeAll(left_title[0..fit.bytes]);
@@ -1955,10 +2034,16 @@ pub const Editor = struct {
             try writeSpaces(w, indent);
             used += indent;
 
-            if (entry.is_dir) {
+            if (entry.is_parent) {
+                try w.writeAll("\x1b[38;2;249;226;175m");
+                if (used + 2 <= content_w) {
+                    try w.writeAll("^ ");
+                    used += 2;
+                }
+            } else if (entry.is_dir) {
                 try w.writeAll("\x1b[38;2;137;180;250m");
                 if (used + 2 <= content_w) {
-                    try w.writeAll(if (entry.is_expanded) "▾ " else "▸ ");
+                    try w.writeAll(if (entry.is_expanded) "v " else "> ");
                     used += 2;
                 }
             } else {
@@ -1969,19 +2054,21 @@ pub const Editor = struct {
                 }
             }
 
-            const avail = if (entry.is_dir and content_w > used + 1) content_w - used - 1 else content_w - used;
+            const show_slash = entry.is_dir and !entry.is_parent;
+            const avail = if (show_slash and content_w > used + 1) content_w - used - 1 else content_w - used;
             const fit = sliceFittingColumns(entry.name, avail);
             try w.writeAll(entry.name[0..fit.bytes]);
             used += fit.cols;
-            if (entry.is_dir and used < content_w) {
+            if (show_slash and used < content_w) {
                 try w.writeByte('/');
                 used += 1;
             }
             if (used < content_w) try writeSpaces(w, content_w - used);
         }
 
-        // Render dedicated vertical scrollbar in the rightmost column of the sidebar (width - 1)
+        // Render dedicated vertical scrollbar in the rightmost column of the sidebar (column = width)
         if (width > 1) {
+            try w.print("\x1b[{d}G", .{width});
             if (total > view_h and view_h > 0) {
                 const thumb_h = @max((view_h * view_h) / total, 1);
                 const max_scroll = total - view_h;
@@ -1993,12 +2080,12 @@ pub const Editor = struct {
                 const is_thumb = (item_row >= thumb_top and item_row < thumb_top + thumb_h);
                 if (is_thumb) {
                     if (self.explorer.focused or self.sidebar_scrollbar_dragging) {
-                        try w.writeAll("\x1b[48;2;24;24;37m\x1b[38;2;137;180;250m█");
+                        try w.writeAll("\x1b[48;2;137;180;250m\x1b[38;2;17;17;27m ");
                     } else {
-                        try w.writeAll("\x1b[48;2;24;24;37m\x1b[38;2;108;112;134m█");
+                        try w.writeAll("\x1b[48;2;108;112;134m\x1b[38;2;17;17;27m ");
                     }
                 } else {
-                    try w.writeAll("\x1b[48;2;24;24;37m\x1b[38;2;49;50;68m░");
+                    try w.writeAll("\x1b[48;2;36;39;58m\x1b[38;2;69;71;90m:");
                 }
             } else {
                 try w.writeAll("\x1b[48;2;24;24;37m ");
@@ -2031,6 +2118,7 @@ pub const Editor = struct {
         doc_line: usize,
         cursor_line: usize,
         lang: Syntax.Language,
+        ed_x: usize,
         gutter_w: usize,
         code_w: usize,
         sel: ?Range,
@@ -2068,9 +2156,11 @@ pub const Editor = struct {
         var last_fg: ?Syntax.Rgb = null;
         var last_bg: ?Syntax.Rgb = null;
 
+        const code_start_col = 1 + ed_x + gutter_w; // 1-based terminal column of code column 0
         var vcol: usize = 0;
         var drawn: usize = 0;
         var i: usize = 0;
+        var need_col_sync = false;
 
         while (i < line.len and drawn < code_w) {
             const abs_off = r.start + i;
@@ -2101,6 +2191,10 @@ pub const Editor = struct {
                 var s_idx: usize = 0;
                 while (s_idx < spaces and drawn < code_w) : (s_idx += 1) {
                     if (vcol >= buf.scroll_col) {
+                        if (need_col_sync) {
+                            try w.print("\x1b[{d}G", .{code_start_col + drawn});
+                            need_col_sync = false;
+                        }
                         try emitColors(w, fg, bg, &last_fg, &last_bg);
                         try w.writeByte(' ');
                         drawn += 1;
@@ -2132,12 +2226,20 @@ pub const Editor = struct {
 
                 if (drawn + cw > code_w) {
                     // Wide character does not fit in the remaining 1 column at the right edge
+                    if (need_col_sync) {
+                        try w.print("\x1b[{d}G", .{code_start_col + drawn});
+                        need_col_sync = false;
+                    }
                     try emitColors(w, fg, bg, &last_fg, &last_bg);
                     try writeSpaces(w, code_w - drawn);
                     drawn = code_w;
                     break;
                 }
 
+                if (need_col_sync) {
+                    try w.print("\x1b[{d}G", .{code_start_col + drawn});
+                    need_col_sync = false;
+                }
                 try emitColors(w, fg, bg, &last_fg, &last_bg);
                 if (safe_len == 1 and line[i] < 0x20) {
                     try w.writeByte('?');
@@ -2147,11 +2249,19 @@ pub const Editor = struct {
                 drawn += cw;
                 vcol += cw;
                 i += safe_len;
+                // Pin next character's exact terminal column after any multi-byte / wide character
+                // so that even in terminal emulators with non-1:2 fonts, horizontal position never drifts!
+                if (safe_len > 1 or cw > 1) {
+                    need_col_sync = true;
+                }
             }
         }
 
         // Fill remaining columns to end of row
         if (drawn < code_w) {
+            if (need_col_sync) {
+                try w.print("\x1b[{d}G", .{code_start_col + drawn});
+            }
             const fill_bg = if (sel != null and r.end >= sel.?.start and r.end < sel.?.end) sel_bg else base_bg;
             try emitColors(w, .{ .r = 205, .g = 214, .b = 244 }, fill_bg, &last_fg, &last_bg);
             try writeSpaces(w, code_w - drawn);
@@ -2248,11 +2358,12 @@ pub const Editor = struct {
                     if (rused < cols) try writeSpaces(w, cols - rused);
                 }
             },
-            .prompt_open, .prompt_save_as, .prompt_goto => {
+            .prompt_open, .prompt_save_as, .prompt_goto, .prompt_chdir => {
                 const label = switch (self.panel) {
-                    .prompt_open => " Open file: ",
+                    .prompt_open => " Open file/dir: ",
                     .prompt_save_as => " Save as: ",
                     .prompt_goto => " Go to line[:col]: ",
+                    .prompt_chdir => " Tree directory: ",
                     else => "",
                 };
                 try w.writeAll("\x1b[38;2;249;226;175m");
@@ -2264,7 +2375,7 @@ pub const Editor = struct {
                 if (used < cols) try writeSpaces(w, cols - used);
             },
             .prompt_encoding => {
-                const prefix = " Encoding (←/→/0-7 Enter): ";
+                const prefix = " Encoding (Left/Right/0-7 Enter): ";
                 try w.writeAll("\x1b[38;2;249;226;175m");
                 const pre_fit = sliceFittingColumns(prefix, cols);
                 try w.writeAll(prefix[0..pre_fit.bytes]);
@@ -2335,15 +2446,15 @@ pub const Editor = struct {
         try w.writeAll(mode_badge);
         try w.writeAll("\x1b[0m\x1b[48;2;17;17;27m ");
 
-        var right_buf: [160]u8 = undefined;
+        var right_buf: [192]u8 = undefined;
         const eol = if (buf.crlf) "CRLF" else "LF";
         const enc_mode = if (buf.encoding_locked or self.forced_encoding != null) "Lock" else "Auto";
         const right_str = if (sel) |s|
-            std.fmt.bufPrint(&right_buf, "Sel {d} │ Ln {d}, Col {d} │ {s}({s}) │ {s} │ {s} ", .{
+            std.fmt.bufPrint(&right_buf, "Sel {d} | Ln {d}, Col {d} | {s}({s}) | {s} | {s} ", .{
                 s.end - s.start, lc.line + 1, lc.col + 1, buf.encoding.name(), enc_mode, eol, lang.name(),
             }) catch ""
         else
-            std.fmt.bufPrint(&right_buf, "Ln {d}, Col {d} │ {s}({s}) │ {s} │ {s} ", .{
+            std.fmt.bufPrint(&right_buf, "Ln {d}, Col {d} | {s}({s}) | {s} | {s} ", .{
                 lc.line + 1, lc.col + 1, buf.encoding.name(), enc_mode, eol, lang.name(),
             }) catch "";
 
@@ -2363,7 +2474,7 @@ pub const Editor = struct {
             mid_cols = fit.cols;
         } else {
             try w.writeAll("\x1b[38;2;166;173;200m");
-            const path_str = buf.path orelse buf.displayName();
+            const path_str = if (self.explorer.focused) self.explorer.root_path else (buf.path orelse buf.displayName());
             const fit = sliceFittingColumns(path_str, max_mid);
             try w.writeAll(path_str[0..fit.bytes]);
             mid_cols = fit.cols;
@@ -2374,8 +2485,7 @@ pub const Editor = struct {
             try writeSpaces(w, cols - total_left - right_cols);
         }
         if (cols >= total_left + right_cols) {
-            try w.writeAll("\x1b[38;2;147;153;178m");
-            try w.writeAll(right_str);
+            try w.print("\x1b[{d}G\x1b[38;2;147;153;178m{s}", .{ cols - right_cols + 1, right_str });
         }
         try w.writeAll("\x1b[0m");
     }
@@ -2409,7 +2519,7 @@ pub const Editor = struct {
                     }
                 },
                 .prompt_open => {
-                    const cx = @min(13 + strDisplayWidth(self.prompt_input.items), size.cols);
+                    const cx = @min(17 + strDisplayWidth(self.prompt_input.items), size.cols);
                     try w.print("\x1b[{d};{d}H\x1b[?25h", .{ start_row, cx });
                 },
                 .prompt_save_as => {
@@ -2418,6 +2528,10 @@ pub const Editor = struct {
                 },
                 .prompt_goto => {
                     const cx = @min(20 + strDisplayWidth(self.prompt_input.items), size.cols);
+                    try w.print("\x1b[{d};{d}H\x1b[?25h", .{ start_row, cx });
+                },
+                .prompt_chdir => {
+                    const cx = @min(18 + strDisplayWidth(self.prompt_input.items), size.cols);
                     try w.print("\x1b[{d};{d}H\x1b[?25h", .{ start_row, cx });
                 },
                 .prompt_encoding => {
