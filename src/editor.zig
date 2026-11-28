@@ -24,6 +24,7 @@ pub const PanelMode = enum {
     prompt_save_as,
     prompt_goto,
     prompt_encoding,
+    prompt_font,
     prompt_chdir,
 };
 
@@ -51,6 +52,7 @@ pub const Editor = struct {
     // Encoding auto-detect vs manual lock
     forced_encoding: ?Encoding,
     encoding_picker_idx: usize,
+    font_picker_idx: usize,
 
     // Clipboard
     clipboard: std.ArrayList(u8),
@@ -109,6 +111,7 @@ pub const Editor = struct {
             .close_confirm = false,
             .forced_encoding = null,
             .encoding_picker_idx = 0,
+            .font_picker_idx = 0,
             .clipboard = std.ArrayList(u8).init(allocator),
             .status_msg = undefined,
             .status_msg_len = 0,
@@ -481,9 +484,7 @@ pub const Editor = struct {
                         return;
                     }
                     if (lo == 'f') {
-                        const font_name = self.term.cycleFontPreset();
-                        self.clear_screen_on_render = true;
-                        self.setStatusFmt(false, "Font: {s} (Alt+F: switch font)", .{font_name});
+                        self.cycleOrOpenFontPanel();
                         return;
                     }
                     if (ch == '[' or ch == '-' or ch == ',') {
@@ -509,9 +510,7 @@ pub const Editor = struct {
             return;
         }
         if (k.code == .f4) {
-            const font_name = self.term.cycleFontPreset();
-            self.clear_screen_on_render = true;
-            self.setStatusFmt(false, "Font: {s} (F4/Alt+F: switch font)", .{font_name});
+            self.cycleOrOpenFontPanel();
             return;
         }
         if (k.code == .f3) {
@@ -543,6 +542,51 @@ pub const Editor = struct {
         self.panel = .prompt_chdir;
         self.prompt_input.clearRetainingCapacity();
         try self.prompt_input.appendSlice(self.explorer.root_path);
+    }
+
+    pub fn openFontPanel(self: *Editor) void {
+        self.explorer.focused = false;
+        self.panel = .prompt_font;
+        self.prompt_input.clearRetainingCapacity();
+        self.font_picker_idx = self.term.font_preset_idx;
+        const opt = self.term.getFontOption(self.font_picker_idx);
+        self.updateFontStatus(opt, false);
+    }
+
+    pub fn cycleOrOpenFontPanel(self: *Editor) void {
+        self.explorer.focused = false;
+        const total = @max(self.term.fontCount(), 1);
+        if (self.panel == .prompt_font) {
+            self.font_picker_idx = (self.font_picker_idx + 1) % total;
+        } else {
+            self.panel = .prompt_font;
+            self.prompt_input.clearRetainingCapacity();
+            self.font_picker_idx = (self.term.font_preset_idx + 1) % total;
+        }
+        const opt = self.term.applyFontPreset(self.font_picker_idx);
+        self.clear_screen_on_render = true;
+        self.updateFontStatus(opt, false);
+    }
+
+    pub fn applyFontChoice(self: *Editor, choice_idx: usize) void {
+        self.panel = .none;
+        const opt = self.term.applyFontPreset(choice_idx);
+        self.font_picker_idx = self.term.font_preset_idx;
+        self.clear_screen_on_render = true;
+        self.updateFontStatus(opt, true);
+    }
+
+    fn updateFontStatus(self: *Editor, opt: Term.FontOption, confirmed: bool) void {
+        const mode_str = if (opt.is_strict_1to2) "1:2 Native" else "Non-1:2 Cell-Aligned";
+        if (self.term.console_font_changeable) {
+            if (confirmed) {
+                self.setStatusFmt(false, "Font applied: {s} ({d}pt, {s})", .{ opt.name, self.term.font_height, mode_str });
+            } else {
+                self.setStatusFmt(false, "Font preview: {s} ({d}pt, {s}) [Left/Right, -/+:Size, Enter:OK]", .{ opt.name, self.term.font_height, mode_str });
+            }
+        } else {
+            self.setStatusFmt(false, "Font mode: {s} ({s}) [Host terminal controls font glyph; 1:2 cell alignment active]", .{ opt.name, mode_str });
+        }
     }
 
     pub fn openEncodingPanel(self: *Editor) void {
@@ -832,6 +876,69 @@ pub const Editor = struct {
                             try self.applyEncodingChoice(0);
                         } else if (ch >= '1' and ch <= '7') {
                             try self.applyEncodingChoice(@intCast(ch - '0'));
+                        }
+                    },
+                    else => {},
+                }
+            },
+            .prompt_font => {
+                const total_fonts = @max(self.term.fontCount(), 1);
+                switch (k.code) {
+                    .left, .up, .page_up => {
+                        self.font_picker_idx = if (self.font_picker_idx == 0) total_fonts - 1 else self.font_picker_idx - 1;
+                        const opt = self.term.applyFontPreset(self.font_picker_idx);
+                        self.clear_screen_on_render = true;
+                        self.updateFontStatus(opt, false);
+                    },
+                    .right, .down, .page_down, .tab => {
+                        if (k.code == .tab and k.shift) {
+                            self.font_picker_idx = if (self.font_picker_idx == 0) total_fonts - 1 else self.font_picker_idx - 1;
+                        } else {
+                            self.font_picker_idx = (self.font_picker_idx + 1) % total_fonts;
+                        }
+                        const opt = self.term.applyFontPreset(self.font_picker_idx);
+                        self.clear_screen_on_render = true;
+                        self.updateFontStatus(opt, false);
+                    },
+                    .home => {
+                        self.font_picker_idx = 0;
+                        const opt = self.term.applyFontPreset(0);
+                        self.clear_screen_on_render = true;
+                        self.updateFontStatus(opt, false);
+                    },
+                    .end => {
+                        self.font_picker_idx = total_fonts - 1;
+                        const opt = self.term.applyFontPreset(self.font_picker_idx);
+                        self.clear_screen_on_render = true;
+                        self.updateFontStatus(opt, false);
+                    },
+                    .enter => {
+                        self.applyFontChoice(self.font_picker_idx);
+                    },
+                    .char => |ch| {
+                        if ((ch >= '1' and ch <= '9') or (ch >= 0xFF11 and ch <= 0xFF19)) {
+                            const idx: usize = if (ch >= 0xFF11) @intCast(ch - 0xFF11) else @intCast(ch - '1');
+                            if (idx < total_fonts) {
+                                self.applyFontChoice(idx);
+                            }
+                        } else if (ch == 'h' or ch == 'k' or ch == ',') {
+                            self.font_picker_idx = if (self.font_picker_idx == 0) total_fonts - 1 else self.font_picker_idx - 1;
+                            const opt = self.term.applyFontPreset(self.font_picker_idx);
+                            self.clear_screen_on_render = true;
+                            self.updateFontStatus(opt, false);
+                        } else if (ch == 'l' or ch == 'j' or ch == '.' or ch == ' ') {
+                            self.font_picker_idx = (self.font_picker_idx + 1) % total_fonts;
+                            const opt = self.term.applyFontPreset(self.font_picker_idx);
+                            self.clear_screen_on_render = true;
+                            self.updateFontStatus(opt, false);
+                        } else if (ch == '-' or ch == '_' or ch == '[' or ch == '<' or ch == 0xFF0D or ch == 0x2212) {
+                            _ = self.term.adjustFontSize(-2);
+                            self.clear_screen_on_render = true;
+                            self.updateFontStatus(self.term.getFontOption(self.font_picker_idx), false);
+                        } else if (ch == '+' or ch == '=' or ch == ';' or ch == ']' or ch == '>' or ch == 0xFF0B) {
+                            _ = self.term.adjustFontSize(2);
+                            self.clear_screen_on_render = true;
+                            self.updateFontStatus(self.term.getFontOption(self.font_picker_idx), false);
                         }
                     },
                     else => {},
@@ -1268,7 +1375,7 @@ pub const Editor = struct {
                 .find => &self.find_input,
                 .replace => if (self.panel_focus_replace) &self.replace_input else &self.find_input,
                 .prompt_open, .prompt_save_as, .prompt_goto, .prompt_chdir => &self.prompt_input,
-                .prompt_encoding, .none => return,
+                .prompt_encoding, .prompt_font, .none => return,
             };
             try target.appendSlice(raw[0..nl]);
             if (target == &self.find_input) try self.runSearch(true);
@@ -1645,10 +1752,13 @@ pub const Editor = struct {
             return;
         }
 
-        // Click on bottom status bar (y == size.rows - 1): open encoding picker when clicking right side
+        // Click on bottom status bar (y == size.rows - 1): open font picker or encoding picker when clicking right side
         if (m.kind == .press and m.y + 1 == size.rows) {
-            if (size.cols > 30 and m.x + 30 >= size.cols) {
+            if (size.cols > 28 and m.x + 28 >= size.cols) {
                 self.openEncodingPanel();
+                return;
+            } else if (size.cols > 48 and m.x + 48 >= size.cols) {
+                self.openFontPanel();
                 return;
             }
         }
@@ -1759,7 +1869,7 @@ pub const Editor = struct {
     fn panelRows(self: *const Editor) usize {
         return switch (self.panel) {
             .none => 0,
-            .find, .prompt_open, .prompt_save_as, .prompt_goto, .prompt_encoding, .prompt_chdir => 1,
+            .find, .prompt_open, .prompt_save_as, .prompt_goto, .prompt_encoding, .prompt_font, .prompt_chdir => 1,
             .replace => 2,
         };
     }
@@ -2407,6 +2517,55 @@ pub const Editor = struct {
                 }
                 if (used < cols) try writeSpaces(w, cols - used);
             },
+            .prompt_font => {
+                var pre_buf: [96]u8 = undefined;
+                const prefix = std.fmt.bufPrint(&pre_buf, " Font({d}pt <-/-> -/+ Enter): ", .{self.term.font_height}) catch " Font: ";
+                try w.writeAll("\x1b[38;2;249;226;175m");
+                const pre_fit = sliceFittingColumns(prefix, cols);
+                try w.writeAll(prefix[0..pre_fit.bytes]);
+                var used = pre_fit.cols;
+
+                const total_fonts = self.term.fontCount();
+                // Choose start_idx so that self.font_picker_idx is guaranteed to fit in the available columns
+                var start_idx: usize = if (self.font_picker_idx > 1) self.font_picker_idx - 1 else 0;
+                while (start_idx < self.font_picker_idx) {
+                    var check_cols: usize = used;
+                    var k: usize = start_idx;
+                    while (k <= self.font_picker_idx and k < total_fonts) : (k += 1) {
+                        const o = self.term.getFontOption(k);
+                        check_cols += strDisplayWidth(o.name) + 11;
+                    }
+                    if (check_cols <= cols) break;
+                    start_idx += 1;
+                }
+
+                var idx: usize = start_idx;
+                while (idx < total_fonts) : (idx += 1) {
+                    const opt = self.term.getFontOption(idx);
+                    var pill_buf: [160]u8 = undefined;
+                    const tag = if (opt.is_strict_1to2) "[1:2]" else "[Adj]";
+                    const pill = std.fmt.bufPrint(&pill_buf, "{d}:{s}{s}", .{ idx + 1, opt.name, tag }) catch opt.name;
+                    const pill_w = strDisplayWidth(pill);
+                    const needed = pill_w + 3;
+                    if (used + needed > cols) break;
+
+                    if (idx == self.font_picker_idx) {
+                        try w.writeAll(" \x1b[48;2;137;180;250m\x1b[38;2;17;17;27m\x1b[1m ");
+                        try w.writeAll(pill);
+                        try w.writeAll(" \x1b[0m\x1b[48;2;24;24;37m");
+                    } else if (opt.is_strict_1to2) {
+                        try w.writeAll(" \x1b[38;2;166;227;161m ");
+                        try w.writeAll(pill);
+                        try w.writeByte(' ');
+                    } else {
+                        try w.writeAll(" \x1b[38;2;186;194;222m ");
+                        try w.writeAll(pill);
+                        try w.writeByte(' ');
+                    }
+                    used += needed;
+                }
+                if (used < cols) try writeSpaces(w, cols - used);
+            },
             .none => {},
         }
         try w.writeAll("\x1b[0m");
@@ -2428,6 +2587,8 @@ pub const Editor = struct {
             " FIND "
         else if (self.panel == .prompt_encoding)
             " ENCODING "
+        else if (self.panel == .prompt_font)
+            " FONT "
         else if (self.panel != .none)
             " PROMPT "
         else if (self.explorer.focused)
@@ -2446,16 +2607,17 @@ pub const Editor = struct {
         try w.writeAll(mode_badge);
         try w.writeAll("\x1b[0m\x1b[48;2;17;17;27m ");
 
-        var right_buf: [192]u8 = undefined;
+        var right_buf: [224]u8 = undefined;
         const eol = if (buf.crlf) "CRLF" else "LF";
         const enc_mode = if (buf.encoding_locked or self.forced_encoding != null) "Lock" else "Auto";
+        const font_tag = if (self.term.active_font_is_1to2) "1:2" else "Adj";
         const right_str = if (sel) |s|
-            std.fmt.bufPrint(&right_buf, "Sel {d} | Ln {d}, Col {d} | {s}({s}) | {s} | {s} ", .{
-                s.end - s.start, lc.line + 1, lc.col + 1, buf.encoding.name(), enc_mode, eol, lang.name(),
+            std.fmt.bufPrint(&right_buf, "Sel {d} | Ln {d}, Col {d} | {s}[{s}] | {s}({s}) | {s} | {s} ", .{
+                s.end - s.start, lc.line + 1, lc.col + 1, self.term.active_font_name, font_tag, buf.encoding.name(), enc_mode, eol, lang.name(),
             }) catch ""
         else
-            std.fmt.bufPrint(&right_buf, "Ln {d}, Col {d} | {s}({s}) | {s} | {s} ", .{
-                lc.line + 1, lc.col + 1, buf.encoding.name(), enc_mode, eol, lang.name(),
+            std.fmt.bufPrint(&right_buf, "Ln {d}, Col {d} | {s}[{s}] | {s}({s}) | {s} | {s} ", .{
+                lc.line + 1, lc.col + 1, self.term.active_font_name, font_tag, buf.encoding.name(), enc_mode, eol, lang.name(),
             }) catch "";
 
         const right_cols = strDisplayWidth(right_str);
@@ -2534,8 +2696,8 @@ pub const Editor = struct {
                     const cx = @min(18 + strDisplayWidth(self.prompt_input.items), size.cols);
                     try w.print("\x1b[{d};{d}H\x1b[?25h", .{ start_row, cx });
                 },
-                .prompt_encoding => {
-                    // Cursor hidden while choosing encoding pill
+                .prompt_encoding, .prompt_font => {
+                    // Cursor hidden while choosing encoding/font pill
                 },
                 .none => {},
             }

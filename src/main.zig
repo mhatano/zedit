@@ -1,7 +1,8 @@
 const std = @import("std");
 const Editor = @import("editor.zig").Editor;
+const Term = @import("terminal.zig");
 
-pub const VERSION = "0.2.0";
+pub const VERSION = "0.3.0";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -24,7 +25,21 @@ pub fn main() !void {
             try stdout.print("zedit {s}\n", .{VERSION});
             return;
         }
+        if (std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--tui") or std.mem.eql(u8, arg, "--conhost")) {
+            Term.g_force_console_mode = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-conhost") or std.mem.eql(u8, arg, "--wt")) {
+            Term.g_force_console_mode = true;
+            continue;
+        }
         try files.append(arg);
+    }
+
+    // If --console / --conhost was explicitly requested and we are inside Windows Terminal,
+    // relaunch inside a dedicated conhost.exe window unless --wt / --no-conhost was passed.
+    if (Term.Terminal.maybeRelaunchInConhost(allocator, args)) {
+        return;
     }
 
     var editor = try Editor.init(allocator, files.items);
@@ -40,11 +55,12 @@ fn printHelp() !void {
         \\
         \\Usage:
         \\  zedit [files or directory...]
+        \\  zedit --console [files...]   (Run in console/conhost mode on Windows instead of Win32 GDI window)
         \\  zedit --help | --version
         \\
         \\Keybindings:
         \\  Ctrl+S            Save file (Save As if untitled)
-        \\  Ctrl+O            Open file
+        \\  Ctrl+O            Open file or switch directory
         \\  Ctrl+N            New tab / buffer
         \\  Ctrl+W            Close current tab
         \\  Ctrl+Q            Quit (press twice if unsaved changes exist)
@@ -55,8 +71,9 @@ fn printHelp() !void {
         \\  Ctrl+H            Incremental search & replace (Tab switch, Enter replace, Alt+A all)
         \\  Ctrl+G            Go to line[:col]
         \\  Ctrl+U / F2       Select & lock file encoding (Auto, UTF-8, Shift_JIS, EUC-JP, ISO-2022-JP, UTF-16)
+        \\  Alt+F / F4        Select monospace font & adjust font size (-/+)
         \\  Ctrl+Z / Ctrl+Y   Undo / Redo (Ctrl+Shift+Z also Redo)
-        \\  Ctrl+C / X / V    Copy / Cut / Paste (with OSC 52 clipboard sync)
+        \\  Ctrl+C / X / V    Copy / Cut / Paste (with OSC 52 / Windows clipboard sync)
         \\  Ctrl+A            Select all
         \\  Ctrl+D            Duplicate line or selection
         \\  Ctrl+K            Delete current line
@@ -72,6 +89,7 @@ test {
     _ = @import("regex.zig");
     _ = @import("syntax.zig");
     _ = @import("explorer.zig");
+    _ = @import("win32_gui.zig");
     _ = @import("terminal.zig");
     _ = @import("editor.zig");
 }

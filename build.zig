@@ -15,6 +15,11 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
 
+    if (target.result.os.tag == .windows) {
+        exe_mod.linkSystemLibrary("gdi32", .{});
+        exe_mod.linkSystemLibrary("user32", .{});
+    }
+
     if (optimize == .ReleaseSmall) {
         exe.root_module.strip = true;
     }

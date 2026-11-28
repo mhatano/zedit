@@ -148,6 +148,38 @@ const win32 = if (is_windows) struct {
         FaceName: [32]WCHAR = [_]WCHAR{0} ** 32,
     };
 
+    const LOGFONTW = extern struct {
+        lfHeight: i32 = 0,
+        lfWidth: i32 = 0,
+        lfEscapement: i32 = 0,
+        lfOrientation: i32 = 0,
+        lfWeight: i32 = 400,
+        lfItalic: u8 = 0,
+        lfUnderline: u8 = 0,
+        lfStrikeOut: u8 = 0,
+        lfCharSet: u8 = 1, // DEFAULT_CHARSET
+        lfOutPrecision: u8 = 0,
+        lfClipPrecision: u8 = 0,
+        lfQuality: u8 = 0,
+        lfPitchAndFamily: u8 = 0,
+        lfFaceName: [32]WCHAR = [_]WCHAR{0} ** 32,
+    };
+
+    const ENUMLOGFONTEXW = extern struct {
+        elfLogFont: LOGFONTW,
+        elfFullName: [64]WCHAR,
+        elfStyle: [32]WCHAR,
+        elfScript: [32]WCHAR,
+    };
+
+    const SIZE = extern struct {
+        cx: i32,
+        cy: i32,
+    };
+
+    const FIXED_PITCH: u8 = 1;
+    const TRUETYPE_FONTTYPE: DWORD = 0x0004;
+
     const ENABLE_PROCESSED_INPUT: DWORD = 0x0001;
     const ENABLE_LINE_INPUT: DWORD = 0x0002;
     const ENABLE_ECHO_INPUT: DWORD = 0x0004;
@@ -160,6 +192,70 @@ const win32 = if (is_windows) struct {
     const ENABLE_VIRTUAL_TERMINAL_PROCESSING: DWORD = 0x0004;
     const DISABLE_NEWLINE_AUTO_RETURN: DWORD = 0x0008;
 
+    const GENERIC_READ: DWORD = 0x80000000;
+    const GENERIC_WRITE: DWORD = 0x40000000;
+    const FILE_SHARE_READ: DWORD = 0x00000001;
+    const FILE_SHARE_WRITE: DWORD = 0x00000002;
+    const OPEN_EXISTING: DWORD = 3;
+    const CREATE_NEW_CONSOLE: DWORD = 0x00000010;
+
+    const STARTUPINFOW = extern struct {
+        cb: DWORD = @sizeOf(STARTUPINFOW),
+        lpReserved: ?[*:0]WCHAR = null,
+        lpDesktop: ?[*:0]WCHAR = null,
+        lpTitle: ?[*:0]WCHAR = null,
+        dwX: DWORD = 0,
+        dwY: DWORD = 0,
+        dwXSize: DWORD = 0,
+        dwYSize: DWORD = 0,
+        dwXCountChars: DWORD = 0,
+        dwYCountChars: DWORD = 0,
+        dwFillAttribute: DWORD = 0,
+        dwFlags: DWORD = 0,
+        wShowWindow: WORD = 0,
+        cbReserved2: WORD = 0,
+        lpReserved2: ?*u8 = null,
+        hStdInput: ?HANDLE = null,
+        hStdOutput: ?HANDLE = null,
+        hStdError: ?HANDLE = null,
+    };
+
+    const PROCESS_INFORMATION = extern struct {
+        hProcess: HANDLE,
+        hThread: HANDLE,
+        dwProcessId: DWORD,
+        dwThreadId: DWORD,
+    };
+
+    const FONTENUMPROCW = *const fn (lpelfe: *const ENUMLOGFONTEXW, lpntme: *const anyopaque, FontType: DWORD, lParam: isize) callconv(w.WINAPI) c_int;
+
+    extern "kernel32" fn CreateFileW(
+        lpFileName: [*:0]const WCHAR,
+        dwDesiredAccess: DWORD,
+        dwShareMode: DWORD,
+        lpSecurityAttributes: ?*anyopaque,
+        dwCreationDisposition: DWORD,
+        dwFlagsAndAttributes: DWORD,
+        hTemplateFile: ?HANDLE,
+    ) callconv(w.WINAPI) HANDLE;
+    extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(w.WINAPI) BOOL;
+    extern "kernel32" fn GetEnvironmentVariableW(lpName: [*:0]const WCHAR, lpBuffer: [*]WCHAR, nSize: DWORD) callconv(w.WINAPI) DWORD;
+    extern "kernel32" fn SetEnvironmentVariableW(lpName: [*:0]const WCHAR, lpValue: ?[*:0]const WCHAR) callconv(w.WINAPI) BOOL;
+    extern "kernel32" fn GetConsoleWindow() callconv(w.WINAPI) ?HANDLE;
+    extern "kernel32" fn SetConsoleTitleW(lpConsoleTitle: [*:0]const WCHAR) callconv(w.WINAPI) BOOL;
+    extern "kernel32" fn CreateProcessW(
+        lpApplicationName: ?[*:0]const WCHAR,
+        lpCommandLine: [*:0]WCHAR,
+        lpProcessAttributes: ?*anyopaque,
+        lpThreadAttributes: ?*anyopaque,
+        bInheritHandles: BOOL,
+        dwCreationFlags: DWORD,
+        lpEnvironment: ?*anyopaque,
+        lpCurrentDirectory: ?[*:0]const WCHAR,
+        lpStartupInfo: *STARTUPINFOW,
+        lpProcessInformation: *PROCESS_INFORMATION,
+    ) callconv(w.WINAPI) BOOL;
+    extern "user32" fn IsWindowVisible(hWnd: HANDLE) callconv(w.WINAPI) BOOL;
     extern "kernel32" fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: *DWORD) callconv(w.WINAPI) BOOL;
     extern "kernel32" fn SetConsoleMode(hConsoleHandle: HANDLE, dwMode: DWORD) callconv(w.WINAPI) BOOL;
     extern "kernel32" fn GetConsoleScreenBufferInfo(hConsoleOutput: HANDLE, lpConsoleScreenBufferInfo: *CONSOLE_SCREEN_BUFFER_INFO) callconv(w.WINAPI) BOOL;
@@ -170,23 +266,165 @@ const win32 = if (is_windows) struct {
     extern "kernel32" fn SetConsoleCP(wCodePageID: w.UINT) callconv(w.WINAPI) BOOL;
     extern "kernel32" fn GetCurrentConsoleFontEx(hConsoleOutput: HANDLE, bMaximumWindow: BOOL, lpConsoleCurrentFontEx: *CONSOLE_FONT_INFOEX) callconv(w.WINAPI) BOOL;
     extern "kernel32" fn SetCurrentConsoleFontEx(hConsoleOutput: HANDLE, bMaximumWindow: BOOL, lpConsoleCurrentFontEx: *const CONSOLE_FONT_INFOEX) callconv(w.WINAPI) BOOL;
+    extern "kernel32" fn WriteConsoleW(hConsoleOutput: HANDLE, lpBuffer: [*]const WCHAR, nNumberOfCharsToWrite: DWORD, lpNumberOfCharsWritten: *DWORD, lpReserved: ?*anyopaque) callconv(w.WINAPI) BOOL;
+
+    extern "gdi32" fn CreateCompatibleDC(hdc: ?HANDLE) callconv(w.WINAPI) ?HANDLE;
+    extern "gdi32" fn DeleteDC(hdc: HANDLE) callconv(w.WINAPI) BOOL;
+    extern "gdi32" fn EnumFontFamiliesExW(hdc: HANDLE, lpLogfont: *LOGFONTW, lpProc: FONTENUMPROCW, lParam: isize, dwFlags: DWORD) callconv(w.WINAPI) c_int;
+    extern "gdi32" fn CreateFontIndirectW(lplf: *const LOGFONTW) callconv(w.WINAPI) ?HANDLE;
+    extern "gdi32" fn SelectObject(hdc: HANDLE, h: HANDLE) callconv(w.WINAPI) ?HANDLE;
+    extern "gdi32" fn DeleteObject(ho: HANDLE) callconv(w.WINAPI) BOOL;
+    extern "gdi32" fn GetTextExtentPoint32W(hdc: HANDLE, lpString: [*]const WCHAR, c: c_int, psizl: *SIZE) callconv(w.WINAPI) BOOL;
 } else struct {};
 
-pub const FontPreset = struct {
-    label: []const u8,
-    win_names: []const []const u8,
+pub const FontOption = struct {
+    name: []const u8, // Owned UTF-8 face name (e.g. "MS Gothic", "BIZ UDGothic", "Consolas")
+    win_face: []const u8, // Owned UTF-8 Win32 face name passed to SetCurrentConsoleFontEx
+    is_strict_1to2: bool, // True if halfwidth:fullwidth advance ratio is strictly 1:2
 };
 
-pub const FONT_PRESETS = [_]FontPreset{
-    // MS Gothic ("ＭＳ ゴシック"): Strict 1:2 halfwidth:fullwidth ratio guaranteed on all Windows versions
-    .{ .label = "MS Gothic (1:2)", .win_names = &.{ "\xef\xbc\xad\xef\xbc\xb3 \xe3\x82\xb4\xe3\x82\xb7\xe3\x83\x83\xe3\x82\xaf", "MS Gothic" } },
-    // BIZ UDGothic: Clear modern Japanese gothic bundled in Windows 10/11
-    .{ .label = "BIZ UDGothic", .win_names = &.{"BIZ UDGothic"} },
-    // Popular developer 1:2 Japanese programming fonts if installed
-    .{ .label = "PlemolJP / HackGen", .win_names = &.{ "PlemolJP Console", "PlemolJP", "HackGen Console", "HackGen", "UDEV Gothic", "Sarasa Mono J", "Ricty Diminished", "MyricaM M" } },
-    // Yu Gothic / Meiryo fallback
-    .{ .label = "Yu Gothic", .win_names = &.{ "Yu Gothic", "\xe6\xb8\xb8\xe3\x82\xb4\xe3\x82\xb7\xe3\x83\x83\xe3\x82\xaf" } },
+const FallbackFontDef = struct {
+    name: []const u8,
+    win_face: []const u8,
+    is_strict_1to2: bool,
 };
+
+const FALLBACK_FONTS = [_]FallbackFontDef{
+    .{ .name = "MS Gothic", .win_face = "\xef\xbc\xad\xef\xbc\xb3 \xe3\x82\xb4\xe3\x82\xb7\xe3\x83\x83\xe3\x82\xaf", .is_strict_1to2 = true },
+    .{ .name = "BIZ UDGothic", .win_face = "BIZ UDGothic", .is_strict_1to2 = true },
+    .{ .name = "PlemolJP Console", .win_face = "PlemolJP Console", .is_strict_1to2 = true },
+    .{ .name = "HackGen Console", .win_face = "HackGen Console", .is_strict_1to2 = true },
+    .{ .name = "UDEV Gothic", .win_face = "UDEV Gothic", .is_strict_1to2 = true },
+    .{ .name = "Sarasa Mono J", .win_face = "Sarasa Mono J", .is_strict_1to2 = true },
+    .{ .name = "MyricaM M", .win_face = "MyricaM M", .is_strict_1to2 = true },
+    .{ .name = "Ricty Diminished", .win_face = "Ricty Diminished", .is_strict_1to2 = true },
+    .{ .name = "Cascadia Mono", .win_face = "Cascadia Mono", .is_strict_1to2 = false },
+    .{ .name = "Consolas", .win_face = "Consolas", .is_strict_1to2 = false },
+    .{ .name = "Courier New", .win_face = "Courier New", .is_strict_1to2 = false },
+    .{ .name = "Lucida Console", .win_face = "Lucida Console", .is_strict_1to2 = false },
+};
+
+const WinFontEnumCtx = if (is_windows) struct {
+    term: *Terminal,
+    dc: win32.HANDLE,
+
+    fn callback(lpelfe: *const win32.ENUMLOGFONTEXW, _: *const anyopaque, font_type: win32.DWORD, lparam: isize) callconv(std.os.windows.WINAPI) c_int {
+        const ctx: *WinFontEnumCtx = @ptrFromInt(@as(usize, @bitCast(lparam)));
+        const lf = &lpelfe.elfLogFont;
+
+        // Only allow TrueType/OpenType monospace (FIXED_PITCH) fonts
+        if ((font_type & win32.TRUETYPE_FONTTYPE) == 0) return 1;
+        if ((lf.lfPitchAndFamily & 0x03) != win32.FIXED_PITCH) return 1;
+
+        // Find length of null-terminated UTF-16 face name
+        var wlen: usize = 0;
+        while (wlen < lf.lfFaceName.len and lf.lfFaceName[wlen] != 0) : (wlen += 1) {}
+        if (wlen == 0) return 1;
+
+        // Exclude vertical fonts starting with '@'
+        if (lf.lfFaceName[0] == '@') return 1;
+
+        var utf8_buf: [128]u8 = undefined;
+        const utf8_len = std.unicode.utf16LeToUtf8(&utf8_buf, lf.lfFaceName[0..wlen]) catch return 1;
+        const face_utf8 = utf8_buf[0..utf8_len];
+
+        // Exclude symbol/icon fonts that cannot render text in a console
+        if (std.mem.indexOf(u8, face_utf8, "Marlett") != null or
+            std.mem.indexOf(u8, face_utf8, "Wingdings") != null or
+            std.mem.indexOf(u8, face_utf8, "Webdings") != null or
+            std.mem.indexOf(u8, face_utf8, "Symbol") != null)
+        {
+            return 1;
+        }
+
+        // Deduplicate
+        for (ctx.term.fonts.items) |existing| {
+            if (std.ascii.eqlIgnoreCase(existing.name, face_utf8) or std.mem.eql(u8, existing.win_face, face_utf8)) {
+                return 1;
+            }
+        }
+
+        // Measure actual halfwidth ('A', 'M', 'i') and fullwidth ('あ', '漢') glyph widths in GDI
+        var test_lf = lf.*;
+        test_lf.lfHeight = -24;
+        test_lf.lfWidth = 0;
+        var is_strict_1to2 = false;
+        var is_true_monospace = true;
+
+        if (win32.CreateFontIndirectW(&test_lf)) |hfont| {
+            defer _ = win32.DeleteObject(hfont);
+            const old_obj = win32.SelectObject(ctx.dc, hfont);
+            defer if (old_obj) |o| {
+                _ = win32.SelectObject(ctx.dc, o);
+            };
+
+            const ch_i = [1]u16{'i'};
+            const ch_M = [1]u16{'M'};
+            const ch_A = [1]u16{'A'};
+            const ch_a_jp = [1]u16{0x3042}; // 'あ'
+            const ch_kanji = [1]u16{0x6F22}; // '漢'
+            var sz_i = win32.SIZE{ .cx = 0, .cy = 0 };
+            var sz_M = win32.SIZE{ .cx = 0, .cy = 0 };
+            var sz_A = win32.SIZE{ .cx = 0, .cy = 0 };
+            var sz_jp = win32.SIZE{ .cx = 0, .cy = 0 };
+            var sz_kanji = win32.SIZE{ .cx = 0, .cy = 0 };
+
+            if (win32.GetTextExtentPoint32W(ctx.dc, &ch_i, 1, &sz_i) != 0 and
+                win32.GetTextExtentPoint32W(ctx.dc, &ch_M, 1, &sz_M) != 0 and
+                win32.GetTextExtentPoint32W(ctx.dc, &ch_A, 1, &sz_A) != 0 and
+                win32.GetTextExtentPoint32W(ctx.dc, &ch_a_jp, 1, &sz_jp) != 0 and
+                win32.GetTextExtentPoint32W(ctx.dc, &ch_kanji, 1, &sz_kanji) != 0)
+            {
+                if (sz_i.cx <= 0 or sz_i.cx != sz_M.cx or sz_A.cx != sz_M.cx) {
+                    is_true_monospace = false;
+                } else if (sz_jp.cx == sz_A.cx * 2 and sz_kanji.cx == sz_A.cx * 2) {
+                    // Check if font actually supports Japanese charset (SHIFTJIS_CHARSET=128) or is a known CJK 1:2 font
+                    is_strict_1to2 = (lf.lfCharSet == 128) or isKnown1To2FontName(face_utf8);
+                }
+            }
+        }
+
+        if (!is_true_monospace) return 1;
+        if (isKnown1To2FontName(face_utf8)) is_strict_1to2 = true;
+
+        // Friendly label for fullwidth Japanese MS Gothic name ("ＭＳ ゴシック")
+        const display_name = if (std.mem.eql(u8, face_utf8, "\xef\xbc\xad\xef\xbc\xb3 \xe3\x82\xb4\xe3\x82\xb7\xe3\x83\x83\xe3\x82\xaf"))
+            "MS Gothic (\xef\xbc\xad\xef\xbc\xb3 \xe3\x82\xb4\xe3\x82\xb7\xe3\x83\x83\xe3\x82\xaf)"
+        else
+            face_utf8;
+
+        ctx.term.addFontOption(display_name, face_utf8, is_strict_1to2) catch {};
+        return 1;
+    }
+} else struct {};
+
+fn isKnown1To2FontName(name: []const u8) bool {
+    const known = [_][]const u8{
+        "\xef\xbc\xad\xef\xbc\xb3 \xe3\x82\xb4\xe3\x82\xb7\xe3\x83\x83\xe3\x82\xaf", // ＭＳ ゴシック
+        "MS Gothic",
+        "BIZ UDGothic",
+        "PlemolJP",
+        "HackGen",
+        "UDEV Gothic",
+        "Sarasa Mono",
+        "Myrica",
+        "Ricty",
+        "Cica",
+        "Moralerspace",
+        "VL Gothic",
+        "IPAGothic",
+        "Noto Sans Mono CJK",
+        "Source Han Code JP",
+    };
+    for (known) |k| {
+        if (std.mem.indexOf(u8, name, k) != null) return true;
+    }
+    return false;
+}
+
+const Win32Gui = @import("win32_gui.zig").Win32Gui;
+
+pub var g_force_console_mode: bool = false;
 
 pub const Terminal = struct {
     allocator: std.mem.Allocator,
@@ -200,8 +438,14 @@ pub const Terminal = struct {
     orig_font: if (is_windows) win32.CONSOLE_FONT_INFOEX else void,
     has_orig_font: if (is_windows) bool else void,
     win_utf16_high: if (is_windows) ?u16 else void,
+    win_gui: if (is_windows) ?*Win32Gui else void,
+
+    fonts: std.ArrayList(FontOption),
     font_preset_idx: usize,
+    font_height: i16,
     active_font_name: []const u8,
+    active_font_is_1to2: bool,
+    console_font_changeable: bool,
 
     last_size: Size,
     in_buf: std.ArrayList(u8),
@@ -220,39 +464,236 @@ pub const Terminal = struct {
             .orig_font = if (is_windows) .{} else {},
             .has_orig_font = if (is_windows) false else {},
             .win_utf16_high = if (is_windows) null else {},
+            .win_gui = if (is_windows) null else {},
+            .fonts = std.ArrayList(FontOption).init(allocator),
             .font_preset_idx = 0,
-            .active_font_name = "MS Gothic (1:2)",
+            .font_height = 18,
+            .active_font_name = "MS Gothic",
+            .active_font_is_1to2 = true,
+            .console_font_changeable = true,
             .last_size = .{ .cols = 80, .rows = 24 },
             .in_buf = std.ArrayList(u8).init(allocator),
             .paste_buf = std.ArrayList(u8).init(allocator),
             .in_paste = false,
         };
+        errdefer term.freeFonts();
+        try term.discoverMonospaceFonts();
         try term.enableRawMode();
         term.last_size = term.getSize();
         return term;
     }
 
+    fn freeFonts(self: *Terminal) void {
+        for (self.fonts.items) |f| {
+            self.allocator.free(f.name);
+            self.allocator.free(f.win_face);
+        }
+        self.fonts.deinit();
+    }
+
+    pub fn addFontOption(self: *Terminal, name: []const u8, win_face: []const u8, is_strict_1to2: bool) !void {
+        const dup_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(dup_name);
+        const dup_face = try self.allocator.dupe(u8, win_face);
+        errdefer self.allocator.free(dup_face);
+        try self.fonts.append(.{
+            .name = dup_name,
+            .win_face = dup_face,
+            .is_strict_1to2 = is_strict_1to2,
+        });
+    }
+
+    fn discoverMonospaceFonts(self: *Terminal) !void {
+        if (is_windows) {
+            if (win32.CreateCompatibleDC(null)) |dc| {
+                defer _ = win32.DeleteDC(dc);
+                var lf = win32.LOGFONTW{
+                    .lfCharSet = 1, // DEFAULT_CHARSET
+                };
+                var ctx = WinFontEnumCtx{ .term = self, .dc = dc };
+                _ = win32.EnumFontFamiliesExW(dc, &lf, WinFontEnumCtx.callback, @bitCast(@intFromPtr(&ctx)), 0);
+            }
+        }
+
+        // If enumeration found nothing (e.g. non-Windows or headless), populate fallback monospace fonts
+        if (self.fonts.items.len == 0) {
+            for (FALLBACK_FONTS) |fb| {
+                try self.addFontOption(fb.name, fb.win_face, fb.is_strict_1to2);
+            }
+        }
+
+        // Sort fonts so strict 1:2 CJK monospace fonts come first (with MS Gothic / BIZ UDGothic at the very top),
+        // followed by non-1:2 monospace fonts in alphabetical order.
+        std.mem.sort(FontOption, self.fonts.items, {}, struct {
+            fn lessThan(_: void, a: FontOption, b: FontOption) bool {
+                if (a.is_strict_1to2 != b.is_strict_1to2) {
+                    return a.is_strict_1to2; // 1:2 fonts first
+                }
+                const pa = priorityRank(a.win_face);
+                const pb = priorityRank(b.win_face);
+                if (pa != pb) return pa < pb;
+                return std.ascii.lessThanIgnoreCase(a.name, b.name);
+            }
+
+            fn priorityRank(face: []const u8) usize {
+                if (std.mem.indexOf(u8, face, "\xef\xbc\xad\xef\xbc\xb3 \xe3\x82\xb4\xe3\x82\xb7\xe3\x83\x83\xe3\x82\xaf") != null or
+                    std.ascii.eqlIgnoreCase(face, "MS Gothic")) return 0;
+                if (std.mem.indexOf(u8, face, "BIZ UDGothic") != null) return 1;
+                if (std.mem.indexOf(u8, face, "PlemolJP") != null) return 2;
+                if (std.mem.indexOf(u8, face, "HackGen") != null) return 3;
+                if (std.mem.indexOf(u8, face, "UDEV Gothic") != null) return 4;
+                if (std.mem.indexOf(u8, face, "Cascadia Mono") != null) return 10;
+                if (std.mem.indexOf(u8, face, "Consolas") != null) return 11;
+                return 5;
+            }
+        }.lessThan);
+    }
+
     pub fn deinit(self: *Terminal) void {
         self.disableRawMode();
+        self.freeFonts();
         self.in_buf.deinit();
         self.paste_buf.deinit();
     }
 
+    fn openConOutHandle(self: *const Terminal) struct { handle: if (is_windows) win32.HANDLE else void, need_close: bool } {
+        if (is_windows) {
+            const conout_w = [_:0]u16{ 'C', 'O', 'N', 'O', 'U', 'T', '$' };
+            const h = win32.CreateFileW(
+                &conout_w,
+                win32.GENERIC_READ | win32.GENERIC_WRITE,
+                win32.FILE_SHARE_READ | win32.FILE_SHARE_WRITE,
+                null,
+                win32.OPEN_EXISTING,
+                0,
+                null,
+            );
+            if (h != std.os.windows.INVALID_HANDLE_VALUE) {
+                return .{ .handle = h, .need_close = true };
+            }
+            return .{ .handle = self.stdout_file.handle, .need_close = false };
+        }
+        return .{ .handle = {}, .need_close = false };
+    }
+
+    fn isUnderWindowsTerminal() bool {
+        if (is_windows) {
+            const conhost_flag = [_:0]u16{ 'Z', 'E', 'D', 'I', 'T', '_', 'I', 'N', '_', 'C', 'O', 'N', 'H', 'O', 'S', 'T' };
+            var fbuf: [8]u16 = undefined;
+            if (win32.GetEnvironmentVariableW(&conhost_flag, &fbuf, fbuf.len) > 0) {
+                return false;
+            }
+            const wt_var = [_:0]u16{ 'W', 'T', '_', 'S', 'E', 'S', 'S', 'I', 'O', 'N' };
+            var buf: [8]u16 = undefined;
+            if (win32.GetEnvironmentVariableW(&wt_var, &buf, buf.len) > 0) {
+                return true;
+            }
+            if (win32.GetConsoleWindow()) |hwnd| {
+                if (win32.IsWindowVisible(hwnd) == 0) {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    pub fn maybeRelaunchInConhost(allocator: std.mem.Allocator, raw_args: []const []const u8) bool {
+        if (!is_windows) return false;
+        // Only relaunch in conhost.exe when user explicitly asks for console mode (--console / --conhost)
+        // because default mode on Windows opens our native Win32 GDI window!
+        if (!g_force_console_mode) return false;
+
+        const conhost_flag = [_:0]u16{ 'Z', 'E', 'D', 'I', 'T', '_', 'I', 'N', '_', 'C', 'O', 'N', 'H', 'O', 'S', 'T' };
+        var fbuf: [8]u16 = undefined;
+        if (win32.GetEnvironmentVariableW(&conhost_flag, &fbuf, fbuf.len) > 0) {
+            const wt_var = [_:0]u16{ 'W', 'T', '_', 'S', 'E', 'S', 'S', 'I', 'O', 'N' };
+            _ = win32.SetEnvironmentVariableW(&wt_var, null);
+            return false;
+        }
+
+        for (raw_args[1..]) |a| {
+            if (std.mem.eql(u8, a, "--no-conhost") or std.mem.eql(u8, a, "--wt")) {
+                return false;
+            }
+        }
+
+        if (!isUnderWindowsTerminal()) return false;
+
+        const one_w = [_:0]u16{'1'};
+        _ = win32.SetEnvironmentVariableW(&conhost_flag, &one_w);
+
+        const exe_path = std.fs.selfExePathAlloc(allocator) catch return false;
+        defer allocator.free(exe_path);
+
+        var sysroot_w: [260]u16 = undefined;
+        const sr_name = [_:0]u16{ 'S', 'y', 's', 't', 'e', 'm', 'R', 'o', 'o', 't' };
+        const sr_len = win32.GetEnvironmentVariableW(&sr_name, &sysroot_w, sysroot_w.len);
+        var sysroot_utf8_buf: [260]u8 = undefined;
+        const sysroot_utf8: []const u8 = if (sr_len > 0 and sr_len < sysroot_w.len)
+            sysroot_utf8_buf[0..(std.unicode.utf16LeToUtf8(&sysroot_utf8_buf, sysroot_w[0..sr_len]) catch 0)]
+        else
+            "C:\\Windows";
+        const root_str = if (sysroot_utf8.len > 0) sysroot_utf8 else "C:\\Windows";
+
+        var cmd_utf8 = std.ArrayList(u8).init(allocator);
+        defer cmd_utf8.deinit();
+        cmd_utf8.writer().print("\"{s}\\System32\\conhost.exe\" \"{s}\"", .{ root_str, exe_path }) catch return false;
+        for (raw_args[1..]) |a| {
+            cmd_utf8.writer().print(" \"{s}\"", .{a}) catch return false;
+        }
+
+        const cmd_w = std.unicode.utf8ToUtf16LeAllocZ(allocator, cmd_utf8.items) catch return false;
+        defer allocator.free(cmd_w);
+
+        var si = win32.STARTUPINFOW{};
+        var pi: win32.PROCESS_INFORMATION = undefined;
+        // Note: conhost.exe is a GUI subsystem exe; launch with dwCreationFlags = 0 so Windows 11 DefTerm does not intercept it!
+        if (win32.CreateProcessW(
+            null,
+            cmd_w.ptr,
+            null,
+            null,
+            0,
+            0,
+            null,
+            null,
+            &si,
+            &pi,
+        ) != 0) {
+            _ = win32.CloseHandle(pi.hThread);
+            _ = win32.CloseHandle(pi.hProcess);
+            return true;
+        }
+        return false;
+    }
+
     fn enableRawMode(self: *Terminal) !void {
         if (is_windows) {
+            // Solution B (default on Windows): Open dedicated Win32 GDI window with 100% font control & 1:2 cell alignment!
+            if (!g_force_console_mode) {
+                if (self.fonts.items.len > 0) {
+                    self.active_font_name = self.fonts.items[0].name;
+                    self.active_font_is_1to2 = self.fonts.items[0].is_strict_1to2;
+                }
+                if (Win32Gui.init(self.allocator, self)) |gui| {
+                    self.win_gui = gui;
+                    self.raw_enabled = true;
+                    self.console_font_changeable = true;
+                    _ = self.applyFontPreset(0);
+                    return;
+                } else |_| {
+                    // Fallback to console mode if GUI window creation fails (e.g. headless SSH session)
+                }
+            }
+
+            // Solution A (Console Mode): Keep CodePage 932 when calling SetCurrentConsoleFontEx and use WriteConsoleW!
             const in_h = self.stdin_file.handle;
             const out_h = self.stdout_file.handle;
-            _ = win32.SetConsoleOutputCP(65001);
-            _ = win32.SetConsoleCP(65001);
             _ = win32.GetConsoleMode(in_h, &self.orig_in_mode);
             _ = win32.GetConsoleMode(out_h, &self.orig_out_mode);
-
-            // Save original console font and switch to a strict 1:2 halfwidth:fullwidth Japanese font (MS Gothic)
-            self.orig_font.cbSize = @sizeOf(win32.CONSOLE_FONT_INFOEX);
-            if (win32.GetCurrentConsoleFontEx(out_h, 0, &self.orig_font) != 0) {
-                self.has_orig_font = true;
-            }
-            _ = self.applyFontPreset(0);
 
             const new_in: std.os.windows.DWORD = win32.ENABLE_WINDOW_INPUT |
                 win32.ENABLE_MOUSE_INPUT |
@@ -261,6 +702,23 @@ pub const Terminal = struct {
                 win32.ENABLE_VIRTUAL_TERMINAL_PROCESSING | win32.DISABLE_NEWLINE_AUTO_RETURN;
             _ = win32.SetConsoleMode(in_h, new_in);
             _ = win32.SetConsoleMode(out_h, new_out);
+
+            self.raw_enabled = true;
+            try self.writeAll("\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[2J\x1b[H");
+
+            const conout = self.openConOutHandle();
+            defer if (conout.need_close) {
+                _ = win32.CloseHandle(conout.handle);
+            };
+            self.orig_font.cbSize = @sizeOf(win32.CONSOLE_FONT_INFOEX);
+            if (win32.GetCurrentConsoleFontEx(conout.handle, 0, &self.orig_font) != 0) {
+                self.has_orig_font = true;
+                if (self.orig_font.dwFontSize.Y >= 10 and self.orig_font.dwFontSize.Y <= 48) {
+                    self.font_height = self.orig_font.dwFontSize.Y;
+                }
+            }
+            _ = self.applyFontPreset(0);
+            return;
         } else {
             const fd = self.stdin_file.handle;
             self.orig_termios = try std.posix.tcgetattr(fd);
@@ -293,75 +751,105 @@ pub const Terminal = struct {
         try self.writeAll("\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[2J\x1b[H");
     }
 
-    pub fn applyFontPreset(self: *Terminal, preset_idx: usize) []const u8 {
-        const idx = preset_idx % FONT_PRESETS.len;
-        self.font_preset_idx = idx;
-        const preset = FONT_PRESETS[idx];
-        self.active_font_name = preset.label;
-
-        if (is_windows) {
-            const out_h = self.stdout_file.handle;
-            const height: i16 = if (self.has_orig_font and self.orig_font.dwFontSize.Y >= 12)
-                self.orig_font.dwFontSize.Y
-            else
-                16;
-
-            for (preset.win_names) |utf8_name| {
-                var fi = win32.CONSOLE_FONT_INFOEX{
-                    .cbSize = @sizeOf(win32.CONSOLE_FONT_INFOEX),
-                    .nFont = 0,
-                    .dwFontSize = .{ .X = 0, .Y = height },
-                    .FontFamily = 54,
-                    .FontWeight = 400,
-                    .FaceName = [_]u16{0} ** 32,
-                };
-                const len = std.unicode.utf8ToUtf16Le(&fi.FaceName, utf8_name) catch continue;
-                if (len < fi.FaceName.len) fi.FaceName[len] = 0;
-                if (win32.SetCurrentConsoleFontEx(out_h, 0, &fi) != 0) {
-                    // Check if Windows actually accepted a font matching our request
-                    var check = win32.CONSOLE_FONT_INFOEX{};
-                    if (win32.GetCurrentConsoleFontEx(out_h, 0, &check) != 0) {
-                        if (check.FaceName[0] == fi.FaceName[0]) {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        return self.active_font_name;
+    pub fn fontCount(self: *const Terminal) usize {
+        return self.fonts.items.len;
     }
 
-    pub fn cycleFontPreset(self: *Terminal) []const u8 {
-        return self.applyFontPreset((self.font_preset_idx + 1) % FONT_PRESETS.len);
+    pub fn getFontOption(self: *const Terminal, idx: usize) FontOption {
+        return self.fonts.items[idx % self.fonts.items.len];
+    }
+
+    pub fn applyFontPreset(self: *Terminal, preset_idx: usize) FontOption {
+        if (self.fonts.items.len == 0) {
+            return .{ .name = "Default", .win_face = "Default", .is_strict_1to2 = false };
+        }
+        const idx = preset_idx % self.fonts.items.len;
+        self.font_preset_idx = idx;
+        const opt = self.fonts.items[idx];
+        self.active_font_name = opt.name;
+        self.active_font_is_1to2 = opt.is_strict_1to2;
+
+        if (is_windows) {
+            if (self.win_gui) |gui| {
+                gui.term = self;
+                gui.setFont(opt.win_face, self.font_height);
+                self.console_font_changeable = true;
+                return opt;
+            }
+
+            // Console mode (Solution A): set CP 932 before SetCurrentConsoleFontEx so conhost accepts Japanese fonts!
+            _ = win32.SetConsoleOutputCP(932);
+            const conout = self.openConOutHandle();
+            defer if (conout.need_close) {
+                _ = win32.CloseHandle(conout.handle);
+            };
+            var fi = win32.CONSOLE_FONT_INFOEX{
+                .cbSize = @sizeOf(win32.CONSOLE_FONT_INFOEX),
+                .nFont = 0,
+                .dwFontSize = .{ .X = 0, .Y = self.font_height },
+                .FontFamily = 54, // FF_MODERN | FIXED_PITCH | TMPF_TRUETYPE
+                .FontWeight = 400,
+                .FaceName = [_]u16{0} ** 32,
+            };
+            if (std.unicode.utf8ToUtf16Le(&fi.FaceName, opt.win_face)) |len| {
+                if (len < fi.FaceName.len) fi.FaceName[len] = 0;
+                const ok = win32.SetCurrentConsoleFontEx(conout.handle, 0, &fi) != 0;
+                _ = win32.SetCurrentConsoleFontEx(self.stdout_file.handle, 0, &fi);
+                var check = win32.CONSOLE_FONT_INFOEX{
+                    .cbSize = @sizeOf(win32.CONSOLE_FONT_INFOEX),
+                };
+                if (!isUnderWindowsTerminal() and ok and win32.GetCurrentConsoleFontEx(conout.handle, 0, &check) != 0) {
+                    var match = true;
+                    var k: usize = 0;
+                    while (k < 3 and k < len) : (k += 1) {
+                        if (check.FaceName[k] != fi.FaceName[k]) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    self.console_font_changeable = match and (check.FaceName[0] != 0);
+                } else {
+                    self.console_font_changeable = false;
+                }
+            } else |_| {}
+        }
+        return opt;
+    }
+
+    pub fn cycleFontPreset(self: *Terminal) FontOption {
+        return self.applyFontPreset((self.font_preset_idx + 1) % @max(self.fonts.items.len, 1));
     }
 
     pub fn adjustFontSize(self: *Terminal, delta: i16) i16 {
+        self.font_height = std.math.clamp(self.font_height + delta, 10, 42);
         if (is_windows) {
-            const out_h = self.stdout_file.handle;
-            var cur = win32.CONSOLE_FONT_INFOEX{};
-            if (win32.GetCurrentConsoleFontEx(out_h, 0, &cur) != 0) {
-                const new_y = std.math.clamp(cur.dwFontSize.Y + delta, 10, 36);
-                cur.dwFontSize.X = 0;
-                cur.dwFontSize.Y = new_y;
-                if (self.has_orig_font) self.orig_font.dwFontSize.Y = new_y;
-                _ = win32.SetCurrentConsoleFontEx(out_h, 0, &cur);
-                return new_y;
-            }
+            _ = self.applyFontPreset(self.font_preset_idx);
         }
-        return 16;
+        return self.font_height;
     }
 
     fn disableRawMode(self: *Terminal) void {
         if (!self.raw_enabled) return;
         self.raw_enabled = false;
+
+        if (is_windows) {
+            if (self.win_gui) |gui| {
+                gui.deinit();
+                self.win_gui = null;
+                return;
+            }
+        }
+
         // Restore normal screen, show cursor, disable mouse & bracketed paste
         self.writeAll("\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[0m\x1b[?1049l") catch {};
 
         if (is_windows) {
             if (self.has_orig_font) {
-                _ = win32.SetCurrentConsoleFontEx(self.stdout_file.handle, 0, &self.orig_font);
+                const conout = self.openConOutHandle();
+                defer if (conout.need_close) {
+                    _ = win32.CloseHandle(conout.handle);
+                };
+                _ = win32.SetCurrentConsoleFontEx(conout.handle, 0, &self.orig_font);
             }
             _ = win32.SetConsoleMode(self.stdin_file.handle, self.orig_in_mode);
             _ = win32.SetConsoleMode(self.stdout_file.handle, self.orig_out_mode);
@@ -371,11 +859,40 @@ pub const Terminal = struct {
     }
 
     pub fn writeAll(self: *Terminal, bytes: []const u8) !void {
+        if (is_windows) {
+            if (self.win_gui) |gui| {
+                gui.writeAnsi(self, bytes);
+                return;
+            }
+            // In Windows console mode, use WriteConsoleW (UTF-16) so we can keep CodePage 932 active
+            // and still output full Unicode + ANSI VT sequences without breaking SetCurrentConsoleFontEx!
+            if (std.unicode.utf8ToUtf16LeAlloc(self.allocator, bytes)) |utf16_slice| {
+                defer self.allocator.free(utf16_slice);
+                var offset: usize = 0;
+                while (offset < utf16_slice.len) {
+                    const chunk: u32 = @intCast(@min(utf16_slice.len - offset, 16384));
+                    var written: win32.DWORD = 0;
+                    if (win32.WriteConsoleW(self.stdout_file.handle, utf16_slice[offset..].ptr, chunk, &written, null) == 0 or written == 0) {
+                        // Fallback to raw stdout write if stdout is redirected
+                        try self.stdout_file.writeAll(bytes);
+                        return;
+                    }
+                    offset += written;
+                }
+                return;
+            } else |_| {}
+        }
         try self.stdout_file.writeAll(bytes);
     }
 
     pub fn copyOsc52(self: *Terminal, text: []const u8) void {
         if (text.len == 0 or text.len > 65536) return;
+        if (is_windows) {
+            if (self.win_gui) |gui| {
+                gui.setClipboard(text);
+                return;
+            }
+        }
         const enc_len = std.base64.standard.Encoder.calcSize(text.len);
         const buf = self.allocator.alloc(u8, enc_len + 16) catch return;
         defer self.allocator.free(buf);
@@ -388,6 +905,9 @@ pub const Terminal = struct {
 
     pub fn getSize(self: *const Terminal) Size {
         if (is_windows) {
+            if (self.win_gui) |gui| {
+                return .{ .cols = gui.cols, .rows = gui.rows };
+            }
             var info: win32.CONSOLE_SCREEN_BUFFER_INFO = undefined;
             if (win32.GetConsoleScreenBufferInfo(self.stdout_file.handle, &info) != 0) {
                 const cols = info.srWindow.Right - info.srWindow.Left + 1;
@@ -411,6 +931,19 @@ pub const Terminal = struct {
     }
 
     fn checkResize(self: *Terminal) bool {
+        if (is_windows) {
+            if (self.win_gui) |gui| {
+                gui.term = self;
+                const was_resized = gui.resized;
+                gui.resized = false;
+                const sz = self.getSize();
+                if (was_resized or sz.cols != self.last_size.cols or sz.rows != self.last_size.rows) {
+                    self.last_size = sz;
+                    return true;
+                }
+                return false;
+            }
+        }
         const sig = if (!is_windows) g_resized.swap(false, .acquire) else g_resized.swap(false, .acquire);
         const sz = self.getSize();
         if (sig or sz.cols != self.last_size.cols or sz.rows != self.last_size.rows) {
@@ -422,6 +955,11 @@ pub const Terminal = struct {
 
     fn pollInput(self: *Terminal, timeout_ms: i32) bool {
         if (is_windows) {
+            if (self.win_gui) |gui| {
+                const before = self.in_buf.items.len;
+                gui.pumpMessages(self, timeout_ms);
+                return self.in_buf.items.len > before;
+            }
             const res = win32.WaitForSingleObject(self.stdin_file.handle, @intCast(timeout_ms));
             if (res == 0) {
                 var count: std.os.windows.DWORD = 0;
@@ -442,6 +980,13 @@ pub const Terminal = struct {
     }
 
     fn readMoreBytes(self: *Terminal, timeout_ms: i32) !usize {
+        if (is_windows) {
+            if (self.win_gui) |gui| {
+                const before = self.in_buf.items.len;
+                gui.pumpMessages(self, timeout_ms);
+                return self.in_buf.items.len - before;
+            }
+        }
         if (!self.pollInput(timeout_ms)) return 0;
         if (is_windows) {
             var records: [64]win32.INPUT_RECORD = undefined;
@@ -556,6 +1101,18 @@ pub const Terminal = struct {
                 0x21 => if (mod == 1) "\x1b[5~" else std.fmt.bufPrint(&buf, "\x1b[5;{d}~", .{mod}) catch "", // VK_PRIOR (PageUp)
                 0x22 => if (mod == 1) "\x1b[6~" else std.fmt.bufPrint(&buf, "\x1b[6;{d}~", .{mod}) catch "", // VK_NEXT (PageDown)
                 0x2E => if (mod == 1) "\x1b[3~" else std.fmt.bufPrint(&buf, "\x1b[3;{d}~", .{mod}) catch "", // VK_DELETE
+                0x60 => "0", // VK_NUMPAD0
+                0x61 => "1", // VK_NUMPAD1
+                0x62 => "2", // VK_NUMPAD2
+                0x63 => "3", // VK_NUMPAD3
+                0x64 => "4", // VK_NUMPAD4
+                0x65 => "5", // VK_NUMPAD5
+                0x66 => "6", // VK_NUMPAD6
+                0x67 => "7", // VK_NUMPAD7
+                0x68 => "8", // VK_NUMPAD8
+                0x69 => "9", // VK_NUMPAD9
+                0x6B => "+", // VK_ADD (Numpad +)
+                0x6D => "-", // VK_SUBTRACT (Numpad -)
                 0x70 => "\x1bOP", // VK_F1
                 0x71 => "\x1bOQ", // VK_F2
                 0x72 => if (shift) "\x1b[1;2R" else "\x1bOR", // VK_F3
